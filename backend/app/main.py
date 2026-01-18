@@ -16,8 +16,15 @@ from .models import (
     ImageInfo,
     LayerDecomposeRequest,
     LayerDecomposeResponse,
+    ObjectEdgeCleanupRequest,
+    ObjectEdgeCleanupResponse,
+    ObjectRestoreRequest,
+    ObjectRestoreResponse,
     QwenWarmupRequest,
     QwenWarmupResponse,
+    ReloadModelsResponse,
+    RestoreObjectRequest,
+    RestoreObjectResponse,
     SamRefineRequest,
     SegmentRequest,
     SegmentResponse,
@@ -31,11 +38,13 @@ from .postprocess import (
     RestoreParams,
     clean_rgba_edges,
     restore_background,
+    restore_object_rgba,
 )
 from .layer_render import render_layer_to_base_canvas
 from .qwen_service import QwenLayeredService
 from .sam3_service import Sam3Service
 from .storage import Storage, get_api_base_url
+from backend.services.restore_router import RestoreObjectService
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -44,6 +53,7 @@ DATA_DIR = ROOT_DIR / "backend" / "data"
 storage = Storage(DATA_DIR)
 sam3_service = Sam3Service()
 qwen_service = QwenLayeredService(storage)
+restore_object_service = RestoreObjectService(storage)
 
 from fastapi.staticfiles import StaticFiles
 
@@ -91,6 +101,33 @@ def layer_decompose(req: LayerDecomposeRequest) -> LayerDecomposeResponse:
 @app.post("/qwen_warmup", response_model=QwenWarmupResponse)
 def qwen_warmup(req: QwenWarmupRequest) -> QwenWarmupResponse:
     return qwen_service.warmup(req)
+
+
+@app.post("/reload_models", response_model=ReloadModelsResponse)
+def reload_models() -> ReloadModelsResponse:
+    try:
+        sam3_service.reset()
+        qwen_service.reset()
+        restore_object_service.reset()
+
+        import torch
+
+        cuda = torch.cuda.is_available()
+        vram_alloc_mb = None
+        vram_res_mb = None
+        if cuda:
+            vram_alloc_mb = int(torch.cuda.memory_allocated() / 1024 / 1024)
+            vram_res_mb = int(torch.cuda.memory_reserved() / 1024 / 1024)
+
+        return ReloadModelsResponse(
+            ok=True,
+            detail="models cleared; will reload lazily on next use",
+            cuda=cuda,
+            vram_allocated_mb=vram_alloc_mb,
+            vram_reserved_mb=vram_res_mb,
+        )
+    except Exception as e:
+        return ReloadModelsResponse(ok=False, detail=str(e))
 
 
 @app.post("/sam_refine", response_model=SegmentResponse)
@@ -381,6 +418,84 @@ def restore(req: RestoreRequest) -> RestoreResponse:
 
     return RestoreResponse(
         restored_asset_id=restored_asset_id, restored_url=_asset_url(restored_asset_id)
+    )
+
+
+@app.post("/object_edge_cleanup", response_model=ObjectEdgeCleanupResponse)
+def object_edge_cleanup(req: ObjectEdgeCleanupRequest) -> ObjectEdgeCleanupResponse:
+    object_path = storage.asset_path(req.object_asset_id, ".png")
+    if not object_path.exists():
+        raise HTTPException(status_code=404, detail="object asset not found")
+
+    object_rgba = Image.open(object_path).convert("RGBA")
+    rgba = np.asarray(object_rgba)
+    mask_u8 = np.where(rgba[:, :, 3] > 0, 255, 0).astype(np.uint8)
+
+    cleaned = clean_rgba_edges(
+        rgba,
+        mask_u8,
+        EdgeCleanupParams(
+            enabled=True,
+            strength=req.strength,
+            feather_px=req.feather_px,
+            erode_px=req.erode_px,
+        ),
+    )
+
+    out_asset_id = storage.new_asset_id()
+    out_path = storage.asset_path(out_asset_id, ".png")
+    Image.fromarray(cleaned, mode="RGBA").save(out_path, format="PNG")
+
+    return ObjectEdgeCleanupResponse(
+        object_asset_id=out_asset_id, object_url=_asset_url(out_asset_id)
+    )
+
+
+@app.post("/object_restore", response_model=ObjectRestoreResponse)
+def object_restore(req: ObjectRestoreRequest) -> ObjectRestoreResponse:
+    object_path = storage.asset_path(req.object_asset_id, ".png")
+    if not object_path.exists():
+        raise HTTPException(status_code=404, detail="object asset not found")
+
+    object_rgba = Image.open(object_path).convert("RGBA")
+    restored_rgba, delta_mask_u8 = restore_object_rgba(
+        np.asarray(object_rgba), strength=req.strength
+    )
+
+    out_asset_id = storage.new_asset_id()
+    out_path = storage.asset_path(out_asset_id, ".png")
+    Image.fromarray(restored_rgba, mode="RGBA").save(out_path, format="PNG")
+
+    delta_asset_id = storage.new_asset_id()
+    delta_path = storage.asset_path(delta_asset_id, ".png")
+    delta_rgba = np.zeros(
+        (delta_mask_u8.shape[0], delta_mask_u8.shape[1], 4), dtype=np.uint8
+    )
+    delta_rgba[:, :, 3] = delta_mask_u8
+    Image.fromarray(delta_rgba, mode="RGBA").save(delta_path, format="PNG")
+
+    return ObjectRestoreResponse(
+        object_asset_id=out_asset_id,
+        object_url=_asset_url(out_asset_id),
+        delta_mask_asset_id=delta_asset_id,
+        delta_mask_url=_asset_url(delta_asset_id),
+    )
+
+
+@app.post("/restore_object", response_model=RestoreObjectResponse)
+def restore_object(req: RestoreObjectRequest) -> RestoreObjectResponse:
+    params = {} if req.params is None else req.params.model_dump(exclude_none=True)
+    result = restore_object_service.restore(
+        layer_id=req.layer_id,
+        engine=req.engine,
+        prompt=req.prompt,
+        params=params,
+        restore_mask_asset_id=req.restore_mask_asset_id,
+    )
+    return RestoreObjectResponse(
+        restored_layer_asset_id=result.asset_id,
+        preview_url=result.url,
+        metadata=result.metadata,
     )
 
 

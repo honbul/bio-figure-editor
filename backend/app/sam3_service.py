@@ -240,6 +240,25 @@ class Sam3Service:
 
         return mask_u8, ious[best_idx], low_res_logits
 
+    def reset(self) -> None:
+        with self._lock:
+            self._current_image_id = None
+            self._state_cache.clear()
+            try:
+                self._predictor._features = {}  # type: ignore[attr-defined]
+                self._predictor._orig_hw = []  # type: ignore[attr-defined]
+                self._predictor._is_image_set = False  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def segment_all(self, image_id: str, image: Image.Image):
         import numpy as _np
         import torch

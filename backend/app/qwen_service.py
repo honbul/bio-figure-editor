@@ -34,6 +34,17 @@ class QwenLayeredService:
         self._cache = {}
         self._pipeline = None
 
+    def reset(self) -> None:
+        self._pipeline = None
+        self._cache.clear()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def warmup(self, req: QwenWarmupRequest) -> QwenWarmupResponse:
         try:
             pipeline, device = self._get_or_load_pipeline()
@@ -183,7 +194,7 @@ class QwenLayeredService:
 
         pipeline_run = pipeline  # type: ignore[reportUnknownVariableType]
 
-        layers = req.num_layers if req.num_layers is not None else 6
+        layers = req.num_layers if req.num_layers is not None else 4
         resolution = 640 if req.preset in ("fast", "balanced") else 1024
         steps = 16 if req.preset == "fast" else 40 if req.preset == "balanced" else 50
         true_cfg_scale = 3.0 if req.preset == "fast" else 4.0
