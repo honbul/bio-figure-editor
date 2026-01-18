@@ -55,6 +55,7 @@ export interface Layer {
   edge_cleanup_strength?: number;
   edge_cleanup_feather_px?: number;
   edge_cleanup_erode_px?: number;
+  edge_cleanup_applied_asset_id?: string;
   protect_other_layers?: boolean;
   x: number;
   y: number;
@@ -76,6 +77,37 @@ export interface RestoreRequest {
 export interface RestoreResponse {
   restored_asset_id: string;
   restored_url: string;
+}
+
+export interface ObjectEdgeCleanupRequest {
+  object_asset_id: string;
+  strength: number;
+  feather_px: number;
+  erode_px: number;
+}
+
+export interface ObjectEdgeCleanupResponse {
+  object_asset_id: string;
+  object_url: string;
+}
+
+export interface ObjectRestoreRequest {
+  layer_id: string;
+  engine: string;
+  prompt?: string;
+  params?: {
+    steps?: number;
+    guidance_scale?: number;
+    seed?: number;
+    resize_long_edge?: number;
+  };
+  restore_mask_asset_id?: string;
+}
+
+export interface ObjectRestoreResponse {
+  restored_layer_asset_id: string;
+  preview_url: string;
+  metadata?: any;
 }
 
 export interface LayerDecomposeRequest {
