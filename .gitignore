@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Runtime data / exports
+backend/data/
+
+# Caches
+.ruff_cache/
+
+# OS
+.DS_Store
