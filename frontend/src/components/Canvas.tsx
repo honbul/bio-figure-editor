@@ -240,7 +240,7 @@ export function Canvas({
         scaleY={stageScale}
         x={stagePos.x}
         y={stagePos.y}
-        draggable={activeTool === 'pan'}
+        draggable={activeTool === 'pan' || activeTool === 'select'}
         onClick={handleStageClick}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}

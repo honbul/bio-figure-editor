@@ -24,7 +24,7 @@ export function LayerList({
   const sortedLayers = [...layers].sort((a, b) => b.z_index - a.z_index);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col flex-1 min-h-0">
       <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
         {sortedLayers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground/50 p-4">

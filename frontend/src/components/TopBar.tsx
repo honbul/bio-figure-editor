@@ -1,4 +1,4 @@
-import { FolderOpen, Save, Download, Undo2, Redo2, Image as ImageIcon, Layers } from 'lucide-react';
+import { FolderOpen, Save, Download, Undo2, Redo2, Image as ImageIcon, Layers, RotateCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -9,12 +9,14 @@ interface TopBarProps {
   onUndo: () => void;
   onRedo: () => void;
   onLayerDecompose: () => void;
+  onReloadModels: () => void;
   canUndo: boolean;
   canRedo: boolean;
   fileName?: string;
+  isReloadingModels?: boolean;
 }
 
-export const TopBar = ({ onOpen, onSave, onExport, onUndo, onRedo, onLayerDecompose, canUndo, canRedo, fileName }: TopBarProps) => {
+export const TopBar = ({ onOpen, onSave, onExport, onUndo, onRedo, onLayerDecompose, onReloadModels, canUndo, canRedo, fileName, isReloadingModels }: TopBarProps) => {
   return (
     <div className="glass h-14 px-4 rounded-full flex items-center justify-between gap-4 animate-in slide-in-from-top-4 duration-500">
       <div className="flex items-center gap-2">
@@ -37,6 +39,16 @@ export const TopBar = ({ onOpen, onSave, onExport, onUndo, onRedo, onLayerDecomp
         </Button>
         <Button variant="ghost" size="icon" onClick={onExport} className="h-9 w-9 rounded-full hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Export">
             <Download className="h-4 w-4" />
+        </Button>
+        <Button 
+            variant="ghost" 
+            size="icon" 
+            onClick={onReloadModels} 
+            disabled={isReloadingModels}
+            className={cn("h-9 w-9 rounded-full hover:bg-white/10 text-muted-foreground hover:text-foreground", isReloadingModels && "animate-spin")}
+            title="Reload Models (SAM/Qwen/Diffusion)"
+        >
+            <RotateCw className="h-4 w-4" />
         </Button>
         <Button
             variant="ghost"
