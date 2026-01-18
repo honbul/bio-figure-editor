@@ -141,3 +141,58 @@ def restore_background(
     out_bgr = cv2.inpaint(bgr, inpaint_mask, radius, method)
     out_rgb = out_bgr[:, :, ::-1].astype(np.uint8)
     return out_rgb
+
+
+def restore_object_rgba(
+    object_rgba_in: object,
+    strength: int = 25,
+) -> tuple[np.ndarray, np.ndarray]:
+    rgba = np.asarray(object_rgba_in)
+    if rgba.dtype != np.uint8 or rgba.ndim != 3 or rgba.shape[-1] != 4:
+        raise ValueError("object_rgba must be uint8 HxWx4")
+
+    import cv2
+
+    strength_i = int(max(0, min(100, strength)))
+
+    alpha = rgba[:, :, 3]
+    if not np.any(alpha > 0):
+        return rgba, np.zeros_like(alpha, dtype=np.uint8)
+
+    grow = int(round(1 + 4 * (strength_i / 100.0)))
+    close = int(round(1 + 3 * (strength_i / 100.0)))
+
+    alpha_bin = (alpha > 0).astype(np.uint8) * 255
+    k_close = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * close + 1, 2 * close + 1)
+    )
+    closed = cv2.morphologyEx(alpha_bin, cv2.MORPH_CLOSE, k_close, iterations=1)
+
+    k_grow = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1))
+    grown = cv2.dilate(closed, k_grow, iterations=1)
+
+    add_mask = (grown > 0) & (alpha_bin == 0)
+
+    if not np.any(add_mask):
+        return rgba, np.zeros_like(alpha, dtype=np.uint8)
+
+    new_alpha = alpha.copy()
+    soft_a = int(round(64 + 128 * (strength_i / 100.0)))
+    new_alpha[add_mask] = np.maximum(new_alpha[add_mask], soft_a).astype(np.uint8)
+
+    rgb = rgba[:, :, :3].copy()
+    k = int(max(1, min(21, 3 + 2 * int(round(4 * (strength_i / 100.0))))))
+    blurred = cv2.GaussianBlur(rgb.astype(np.float32), (k, k), sigmaX=0)
+
+    for c in range(3):
+        channel = rgb[:, :, c].astype(np.float32)
+        blurred_c = blurred[:, :, c]
+        channel[add_mask] = blurred_c[add_mask]
+        rgb[:, :, c] = np.clip(channel, 0, 255).astype(np.uint8)
+
+    out = rgba.copy()
+    out[:, :, :3] = rgb
+    out[:, :, 3] = new_alpha
+
+    delta_mask_u8 = (add_mask.astype(np.uint8) * 255).astype(np.uint8)
+    return out, delta_mask_u8

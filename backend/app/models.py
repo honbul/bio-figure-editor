@@ -81,6 +81,55 @@ class RestoreResponse(BaseModel):
     restored_url: str
 
 
+class ObjectEdgeCleanupRequest(BaseModel):
+    object_asset_id: str
+    strength: int = Field(70, ge=0, le=100)
+    feather_px: int = Field(1, ge=0, le=6)
+    erode_px: int = Field(1, ge=0, le=6)
+
+
+class ObjectEdgeCleanupResponse(BaseModel):
+    object_asset_id: str
+    object_url: str
+
+
+class ObjectRestoreRequest(BaseModel):
+    object_asset_id: str
+    strength: int = Field(25, ge=0, le=100)
+
+
+class ObjectRestoreResponse(BaseModel):
+    object_asset_id: str
+    object_url: str
+    delta_mask_asset_id: str | None = None
+    delta_mask_url: str | None = None
+
+
+class RestoreObjectParams(BaseModel):
+    steps: int | None = Field(None, ge=1, le=200)
+    guidance_scale: float | None = Field(None, ge=0.0, le=50.0)
+    strength: float | None = Field(None, ge=0.0, le=1.0)
+    seed: int | None = None
+    resize_long_edge: int | None = Field(None, ge=64, le=2048)
+
+
+class RestoreObjectRequest(BaseModel):
+    layer_id: str
+    engine: str = Field(
+        ...,
+        pattern="^(sd15_inpaint|sdxl_inpaint|kandinsky22_inpaint)$",
+    )
+    prompt: str | None = None
+    params: RestoreObjectParams | None = None
+    restore_mask_asset_id: str | None = None
+
+
+class RestoreObjectResponse(BaseModel):
+    restored_layer_asset_id: str
+    preview_url: str
+    metadata: dict[str, object]
+
+
 class ExportRequest(BaseModel):
     base_image_id: str
     layers: list[ExportLayer]
@@ -89,8 +138,8 @@ class ExportRequest(BaseModel):
 
 class LayerDecomposeRequest(BaseModel):
     image_id: str
-    num_layers: int | None = Field(None, ge=1, le=32)
-    preset: str = Field("balanced", pattern="^(fast|balanced|best)$")
+    num_layers: int | None = Field(4, ge=1, le=32)
+    preset: str = Field("fast", pattern="^(fast|balanced|best)$")
     seed: int | None = None
 
 
@@ -130,6 +179,14 @@ class QwenWarmupResponse(BaseModel):
     ok: bool
     detail: str
     ram_rss_mb: int | None = None
+    cuda: bool | None = None
+    vram_allocated_mb: int | None = None
+    vram_reserved_mb: int | None = None
+
+
+class ReloadModelsResponse(BaseModel):
+    ok: bool
+    detail: str
     cuda: bool | None = None
     vram_allocated_mb: int | None = None
     vram_reserved_mb: int | None = None
