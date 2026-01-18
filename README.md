@@ -23,8 +23,9 @@ BioSeg is designed to help researchers and educators easily extract and manipula
 - **Dot-to-Segment**: Point prompt to extract objects from figures.
 - **Box-to-Segment**: Box prompt for selecting regions.
 - **Text-to-Segment**: Text prompt to segment by phrase.
+- **Reload Models**: Clear GPU/CPU memory by resetting loaded models (useful for VRAM management).
 - **Edge Cleanup (post-process)**: Removes white fringe/halo artifacts on extracted object PNGs.
-- **Restore Underlying Area (inpaint)**: Fills the "hole" left behind after extracting an object.
+- **Restore Occluded Parts (inpaint)**: Reconstructs missing/hidden regions of a selected object layer using diffusion models (e.g. SD1.5, SDXL).
 - **Layer Management**: Move, scale, rotate, and reorder extracted layers as individual assets.
 - **Project Export**: Save the final composition as a PNG or download a ZIP containing the composition and all individual high-resolution layers.
 
@@ -40,7 +41,7 @@ BioSeg is designed to help researchers and educators easily extract and manipula
 2. **Backend Setup**
    ```bash
    # Ensure dependencies are installed
-   pip install fastapi uvicorn python-multipart pydantic pillow numpy torch
+   pip install fastapi uvicorn python-multipart pydantic pillow numpy torch diffusers transformers
    # Ensure the sam3/ folder is in your PYTHONPATH
    ```
 
@@ -53,39 +54,6 @@ BioSeg is designed to help researchers and educators easily extract and manipula
    ```
 
 ## Running the App
-
-## Qwen Layer Decompose
-
-The UI exposes `Auto Layer Decompose (Qwen)` in the top bar.
-
-This repo ships the endpoint and UI wiring, but the Qwen runtime dependencies are optional.
-If your environment does not have them installed, the endpoint returns HTTP 503 with a clear message.
-
-**Offline setup** (recommended):
-- Pre-download model weights into your HF cache (so you can run with no network).
-- Ensure your env has `diffusers` (with `QwenImageLayeredPipeline`) and `transformers>=4.51.3`.
-
-**System RAM note**
-- The diffusers pipeline can spike CPU RAM during model load. On machines with 48GB RAM (especially if other apps already use 15–20GB), start with preset `fast` and consider reducing `num_layers`.
-
-Common environment variables:
-- `HF_HOME`
-- `TRANSFORMERS_CACHE`
-
-## Post-processing
-
-### Edge Cleanup
-- Toggle per layer in the right-side Properties panel.
-- Parameters:
-  - `Strength`: 0–100 (higher = stronger defringe)
-  - `Feather`: 0–6 px (alpha softening)
-  - `Erode`: 0–6 px (shrinks mask slightly before cleanup)
-
-### Restore Underlying Area
-- Select a layer, then in Properties click `Restore underlying area`.
-- Optional: enable `Protect other layers` to avoid inpainting across other visible objects.
-- This updates the base image non-destructively by switching to a newly generated restored base image (undo via existing history).
-
 
 ### Option 1: All-in-One (Recommended)
 The start script builds the frontend and serves it through the FastAPI backend on a single port.
@@ -105,9 +73,72 @@ uvicorn backend.app.main:app --reload --port 8005
 **Frontend:**
 ```bash
 cd frontend
+# If backend is on a different host/port, set VITE_API_BASE_URL
+# export VITE_API_BASE_URL=http://localhost:8005
 npm run dev
 ```
-> **Note:** The frontend will likely start on port 5176 (configured in vite.config.ts).
+> **Note:** The frontend will likely start on port 5176 (configured in vite.config.ts). If the backend is on a different port than 8005, set `VITE_API_BASE_URL`.
+
+## Qwen Layer Decompose
+
+The UI exposes `Auto Layer Decompose (Qwen)` in the top bar.
+
+This repo ships the endpoint and UI wiring, but the Qwen runtime dependencies are optional.
+If your environment does not have them installed, the endpoint returns HTTP 503 with a clear message.
+
+**Offline setup** (recommended):
+- Pre-download model weights into your HF cache (so you can run with no network).
+- Ensure your env has `diffusers` (with `QwenImageLayeredPipeline`) and `transformers>=4.51.3`.
+
+**System RAM note**
+- The diffusers pipeline can spike CPU RAM during model load. On machines with 48GB RAM (especially if other apps already use 15–20GB), start with preset `fast` and consider reducing `num_layers`.
+- **Defaults**: Preset: `fast`, Layers: `4`.
+
+Common environment variables:
+- `HF_HOME`
+- `TRANSFORMERS_CACHE`
+
+## Post-processing
+
+### Object Restoration (Object-Level, Offline)
+
+The Properties panel includes **Object Restoration**, which reconstructs missing/occluded regions of the *selected object layer* (RGBA). This is object-level completion (inpainting/fill) and **never modifies the base image**.
+
+#### Engines
+- `sd15_inpaint` (Stable Diffusion v1.5 Inpainting) — Quality: Good / Speed: Fast (~6GB+ VRAM)
+- `kandinsky22_inpaint` (Kandinsky 2.2 Inpainting) — Quality: Good / Speed: Medium (~10GB+ VRAM)
+- `sdxl_inpaint` (SDXL Inpainting) — Quality: Very good / Speed: Slow (~16GB+ VRAM)
+
+#### Offline model caching & Setup
+The backend uses `diffusers` with `local_files_only=True`. To run offline, cache weights once while online.
+
+**Precache Script:**
+Run the provided script to download and cache all necessary restoration models:
+```bash
+python precache_diffusion_restore_models.py
+```
+
+Recommended environment variables:
+- `HF_HOME`: set Hugging Face cache directory
+- `HF_HUB_OFFLINE=1`: force offline mode after caching
+
+If a model isn't cached, `/restore_object` will return HTTP 503 with a message indicating the weights are missing.
+
+#### Troubleshooting
+- **Missing weights (503)**: "Weights not available offline". Run the precache script while online.
+- **CUDA OOM (500)**: Lower `steps` in Advanced Settings, reduce `resize_long_edge` (e.g. 768), or switch to `sd15_inpaint`.
+
+### Edge Cleanup
+- Toggle per layer in the right-side Properties panel.
+- **Defaults**:
+  - `Strength`: 70% (strong defringe)
+  - `Feather`: 1 px (slight alpha softening)
+  - `Erode`: 1 px (shrinks mask slightly before cleanup)
+
+### Model Management (VRAM)
+- **Reload Models Button** (Top Bar): Clears GPU memory used by SAM, Qwen, and Diffusion models.
+- Useful if you encounter OOM errors or want to free up resources for other tasks.
+- Models will be lazy-loaded again on the next use.
 
 ## Technical Architecture
 - **Language**: Python (Backend), TypeScript (Frontend)
@@ -117,75 +148,21 @@ npm run dev
 - **Canvas Engine**: Konva.js
 - **Styling**: Tailwind CSS / Shadcn UI components
 
-## Project Summary (for Ongoing Work)
-
-### Core Architecture
-
-**Backend (FastAPI)**
-- RESTful API server handling image processing and model inference
-- Manages local file storage in `backend/data/` with three directories:
-  - `images/` - Original uploaded images (`image_id.png`)
-  - `assets/` - Processed assets: cropped objects, masks, overlays, restored backgrounds (`asset_id.png`, `asset_id.zip`)
-  - `exports/` - Project exports (composition PNG + ZIP archives)
-- Stateless design; all state maintained client-side in React
-
-**Frontend (React/TypeScript)**
-- Single-page application with interactive canvas (`react-konva`)
-- Layer-based composition system supporting transform (x, y, scale, rotation), visibility, locking, z-index
-- Real-time segmentation workflow with undo/redo history
-- Post-processing UI for edge cleanup and background restoration
-
-**Assets Storage**
-- Files referenced by UUID-based IDs (`image_id`, `asset_id`)
-- HTTP endpoints `/image/{image_id}` and `/asset/{asset_id}` serve file contents
-- No database - pure filesystem storage
-
 ### Key API Endpoints
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/upload` | POST | Upload original image, returns `image_id`, dimensions, URL |
-| `/segment` | POST | Interactive segmentation (point/box/text prompts), returns mask/overlay/object assets |
-| `/segment-all` | POST | Auto-segment all objects in image, returns list of segmentation results |
-| `/sam_refine` | POST | Refine segmentation on base image or transformed layer (handles layer composition) |
-| `/restore` | POST | Fill hole left by extracted object via inpainting, optionally protecting other layers |
-| `/layer_decompose` | POST | Qwen-based auto decomposition into RGBA layers (optional dependency) |
-| `/qwen_warmup` | POST | Preload Qwen pipeline, report RAM/VRAM usage, recommended before first decomposition |
-| `/export` | POST | Compose final image and generate ZIP with composition + individual layers |
-| `/image/{image_id}` | GET | Retrieve original uploaded image |
-| `/asset/{asset_id}` | GET | Retrieve processed asset (PNG or ZIP) |
+| `/segment` | POST | Interactive segmentation (point/box/text prompts) |
+| `/segment-all` | POST | Auto-segment all objects in image |
+| `/restore_object` | POST | Object-level diffusion restoration (SD/Kandinsky/SDXL) |
+| `/object_edge_cleanup` | POST | Apply edge cleaning to an object asset |
+| `/layer_decompose` | POST | Qwen-based auto decomposition into RGBA layers |
+| `/reload_models` | POST | Clear GPU memory and reset model states |
+| `/export` | POST | Compose final image and generate ZIP |
 
 ### Key Data Concepts
 
 - **`image_id`**: UUID identifying an uploaded base image, stored as `images/{image_id}.png`
 - **`asset_id`**: UUID identifying any processed asset (cropped object, mask, overlay, restored background, exported composition), stored as `assets/{asset_id}.png` or `.zip`
-- **`layer`**: Frontend concept representing an extracted object with transform state (x, y, scale_x, scale_y, rotation_deg, opacity, visible, locked, z_index)
-- **`mask_asset_id`**: Optional field on layer models referencing the segmentation mask for that layer
-
-### Known Constraints & Pitfalls
-
-**Qwen Layer Decompose**
-- **Resolution**: Fixed to 640px for `fast`/`balanced` presets, 1024px for `best` preset. Images are resized internally.
-- **Memory Sensitivity**: The diffusers pipeline can spike CPU RAM during model load. On machines with ~48GB RAM (especially with 15–20GB already used), use `preset="fast"` and reduce `num_layers`.
-- **OOM Handling**: Runtime errors return HTTP 500 with message "Qwen decomposition failed (possibly OOM). Try preset='fast' or reduce num_layers."
-- **Offline Setup**: Requires `diffusers` (with `QwenImageLayeredPipeline`) and `transformers>=4.51.3`. Model weights must be in local HF cache (run `precache_qwen_image_layered.py` before running offline).
-- **Warmup Recommended**: Call `/qwen_warmup` before first decomposition to load the pipeline and verify memory allocation. Response includes RAM RSS and VRAM allocated/reserved (if CUDA available).
-- **Device Mapping**: Uses `device_map="balanced"` when CUDA is available. Falls back to CPU mode with `low_cpu_mem_usage=True` otherwise.
-- **Caching**: Qwen service caches decomposition results keyed by `(image_id, num_layers, preset, seed)`.
-
-**SAM3 Segmentation**
-- **Point Grid**: Segment-all uses 32x32 grid (1024 points) processed in batches to prevent OOM on some GPUs.
-- **Transform Handling**: `/sam_refine` can refine segmentation on transformed layers by rendering layer composition to a temporary base image.
-
-## Roadmap (Next Steps)
-
-- [ ] Add batch export mode for processing multiple images
-- [ ] Implement mask editing tools (brush, eraser) for manual refinement
-- [ ] Add layer grouping/folders for organizing complex compositions
-- [ ] Support custom SAM3 model checkpoints
-- [ ] Add project save/load (serialize canvas state to JSON)
-- [ ] Integrate additional post-processing filters (blur, color adjustment)
-- [ ] Add keyboard shortcuts for common actions
-- [ ] Improve Qwen decomposition quality with custom prompts
-- [ ] Support multi-language text prompts for SAM3
-- [ ] Add progress indicators for long-running operations
+- **`layer`**: Frontend concept representing an extracted object with transform state
