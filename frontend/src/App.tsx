@@ -4,7 +4,7 @@ import { TopBar } from '@/components/TopBar';
 import { LayerList } from '@/components/LayerList';
 import { Properties } from '@/components/Properties';
 import { Canvas } from '@/components/Canvas';
-import { Layer, ImageInfo, SegmentResponse, LayerDecomposeRequest, LayerDecomposeResponse, Tool } from '@/types';
+import { Layer, ImageInfo, SegmentResponse, LayerDecomposeRequest, LayerDecomposeResponse, Tool, ObjectEdgeCleanupRequest, ObjectEdgeCleanupResponse, ObjectRestoreRequest, ObjectRestoreResponse } from '@/types';
 import { API_BASE_URL } from '@/config';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -17,8 +17,8 @@ import { cn } from '@/lib/utils';
 function App() {
   const [activeTool, setActiveTool] = useState<Tool>('select');
   const [baseImage, setBaseImage] = useState<ImageInfo | null>(null);
-  const [baseImageHistory, setBaseImageHistory] = useState<ImageInfo[]>([]);
-  const [baseImageHistoryIndex, setBaseImageHistoryIndex] = useState(-1);
+  const [_baseImageHistory, setBaseImageHistory] = useState<ImageInfo[]>([]);
+  const [_baseImageHistoryIndex, setBaseImageHistoryIndex] = useState(-1);
   const [layers, setLayers] = useState<Layer[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [history, setHistory] = useState<Layer[][]>([]);
@@ -26,11 +26,14 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [isSegmenting, setIsSegmenting] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
+  const [restoreProgress, setRestoreProgress] = useState<string>('');
+  const [isApplyingEdgeCleanup, setIsApplyingEdgeCleanup] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [showLayerDecomposeDialog, setShowLayerDecomposeDialog] = useState(false);
   const [isDecomposing, setIsDecomposing] = useState(false);
-  const [decomposePreset, setDecomposePreset] = useState<'fast' | 'balanced' | 'best'>('balanced');
-  const [decomposeNumLayers, setDecomposeNumLayers] = useState<number | ''>('');
+  const [isReloadingModels, setIsReloadingModels] = useState(false);
+  const [decomposePreset, setDecomposePreset] = useState<'fast' | 'balanced' | 'best'>('fast');
+  const [decomposeNumLayers, setDecomposeNumLayers] = useState<number | ''>(4);
   const [decomposeSeed, setDecomposeSeed] = useState<number | ''>('');
   const [decomposeProgress, setDecomposeProgress] = useState('');
   const [exportIncludeBase, setExportIncludeBase] = useState(true);
@@ -86,26 +89,56 @@ function App() {
 
   const uploadFile = async (file: File) => {
     setIsUploading(true);
-    const formData = new FormData();
-    formData.append('file', file);
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+    const buildFormData = () => {
+      const fd = new FormData();
+      fd.append('file', file);
+      return fd;
+    };
 
     try {
-      const res = await fetch(`${API_BASE_URL}/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-      if (!res.ok) throw new Error('Upload failed');
-      
-      const data: ImageInfo = await res.json();
-      setBaseImage(data);
-      setBaseImageHistory([data]);
-      setBaseImageHistoryIndex(0);
-      setLayers([]);
-      setHistory([[]]);
-      setHistoryIndex(0);
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const res = await fetch(`${API_BASE_URL}/upload`, {
+            method: 'POST',
+            body: buildFormData(),
+          });
+
+          if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            throw new Error(`Upload failed (${res.status}): ${body || res.statusText}`);
+          }
+
+          const data: ImageInfo = await res.json();
+          setBaseImage(data);
+          setBaseImageHistory([data]);
+          setBaseImageHistoryIndex(0);
+          setLayers([]);
+          setHistory([[]]);
+          setHistoryIndex(0);
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
+          if (attempt < 2) {
+            await sleep(attempt === 0 ? 250 : attempt === 1 ? 900 : 2000);
+            continue;
+          }
+        }
+      }
+
+      if (lastErr) {
+        throw lastErr;
+      }
     } catch (err) {
       console.error(err);
-      alert('Failed to upload image');
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      const hint = msg.includes('NetworkError') || msg.includes('Failed to fetch')
+        ? `\n\nCheck backend is reachable at: ${API_BASE_URL}`
+        : '';
+      alert(`Failed to upload image: ${msg}${hint}`);
     } finally {
       setIsUploading(false);
     }
@@ -314,8 +347,8 @@ function App() {
         asset_url: obj.object_url,
         mask_asset_id: obj.mask_asset_id,
         edge_cleanup_enabled: false,
-        edge_cleanup_strength: 50,
-        edge_cleanup_feather_px: 2,
+        edge_cleanup_strength: 70,
+        edge_cleanup_feather_px: 1,
         edge_cleanup_erode_px: 1,
         x: obj.bbox_xyxy[0],
         y: obj.bbox_xyxy[1],
@@ -350,13 +383,28 @@ function App() {
     if (!baseImage) return;
 
     try {
+      const exportLayers = layers.map((l) => ({
+        layer_id: l.id,
+        asset_id: l.asset_id,
+        x: l.x,
+        y: l.y,
+        scale_x: l.scale_x,
+        scale_y: l.scale_y,
+        rotation_deg: l.rotation_deg,
+        opacity: l.opacity,
+        visible: l.visible,
+        locked: l.locked,
+        z_index: l.z_index,
+        mask_asset_id: l.mask_asset_id,
+      }));
+
       const res = await fetch(`${API_BASE_URL}/export`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           base_image_id: baseImage.image_id,
-          layers: layers,
-          include_base_image: exportIncludeBase
+          layers: exportLayers,
+          include_base_image: exportIncludeBase,
         }),
       });
 
@@ -372,50 +420,130 @@ function App() {
     }
   };
 
-  const handleRestore = async (protectOtherLayers: boolean) => {
-    if (!baseImage || !selectedLayer || !selectedLayer.mask_asset_id) {
-      alert('No layer selected or layer has no mask');
+  const handleRestore = async (settings: { engine: string; prompt?: string; params?: any }) => {
+    if (!selectedLayer) {
+      alert('No layer selected');
       return;
     }
 
     setIsRestoring(true);
+    setRestoreProgress('Loading model...');
+
     try {
-      const protectMaskAssetIds = protectOtherLayers
-        ? layers
-            .filter(l => l.id !== selectedLayer.id && l.visible && l.mask_asset_id)
-            .map(l => l.mask_asset_id!)
-        : undefined;
-
-      const res = await fetch(`${API_BASE_URL}/restore`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          base_image_id: baseImage.image_id,
-          hole_mask_asset_id: selectedLayer.mask_asset_id,
-          protect_mask_asset_ids: protectMaskAssetIds,
-        }),
-      });
-
-      if (!res.ok) throw new Error('Restore failed');
-      const data = await res.json();
-
-      const restoredImageInfo: ImageInfo = {
-        image_id: data.restored_asset_id,
-        url: data.restored_url,
-        width: baseImage.width,
-        height: baseImage.height,
+      const req: ObjectRestoreRequest = {
+        layer_id: selectedLayer.id,
+        engine: settings.engine,
+        prompt: settings.prompt,
+        params: settings.params,
       };
 
-      const newBaseImageHistory = baseImageHistory.slice(0, baseImageHistoryIndex + 1);
-      newBaseImageHistory.push(restoredImageInfo);
-      setBaseImageHistory(newBaseImageHistory);
-      setBaseImageHistoryIndex(newBaseImageHistory.length - 1);
-      setBaseImage(restoredImageInfo);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      setRestoreProgress('Restoring object...');
+
+      const res = await fetch(`${API_BASE_URL}/restore_object`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Object restore failed (${res.status}): ${body || res.statusText}`);
+      }
+
+      setRestoreProgress('Finalizing...');
+      const data: ObjectRestoreResponse = await res.json();
+
+      handleLayerUpdate(selectedLayer.id, {
+        asset_id: data.restored_layer_asset_id,
+        asset_url: data.preview_url,
+      });
+
+      if (data.metadata?.runtime_ms != null) {
+        setRestoreProgress(`Done (runtime: ${data.metadata.runtime_ms}ms${data.metadata.cached ? ', cached' : ''})`);
+      } else {
+        setRestoreProgress('Done');
+      }
+
+      setTimeout(() => setRestoreProgress(''), 1500);
     } catch (err) {
       console.error(err);
-      alert('Failed to restore area');
+      setRestoreProgress('');
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      alert(`Failed to restore occluded parts of object: ${msg}`);
     } finally {
       setIsRestoring(false);
+    }
+  };
+
+  const handleApplyEdgeCleanup = async () => {
+    if (!selectedLayer) {
+      alert('No layer selected');
+      return;
+    }
+
+    if (!selectedLayer.edge_cleanup_enabled) {
+      alert('Enable Object Edge Cleanup first');
+      return;
+    }
+
+    setIsApplyingEdgeCleanup(true);
+    try {
+      const req: ObjectEdgeCleanupRequest = {
+        object_asset_id: selectedLayer.asset_id,
+        strength: selectedLayer.edge_cleanup_strength ?? 70,
+        feather_px: selectedLayer.edge_cleanup_feather_px ?? 1,
+        erode_px: selectedLayer.edge_cleanup_erode_px ?? 1,
+      };
+
+      const res = await fetch(`${API_BASE_URL}/object_edge_cleanup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+
+      if (!res.ok) throw new Error('Object edge cleanup failed');
+      const data: ObjectEdgeCleanupResponse = await res.json();
+
+      handleLayerUpdate(selectedLayer.id, {
+        asset_id: data.object_asset_id,
+        asset_url: data.object_url,
+        edge_cleanup_applied_asset_id: data.object_asset_id,
+      });
+    } catch (err) {
+      console.error(err);
+      alert('Failed to apply edge cleanup');
+    } finally {
+      setIsApplyingEdgeCleanup(false);
+    }
+  };
+
+  const handleReloadModels = async () => {
+    if (isReloadingModels) return;
+    setIsReloadingModels(true);
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/reload_models`, {
+        method: 'POST',
+      });
+      
+      const data = await res.json();
+      
+      if (!res.ok) {
+        throw new Error(data.detail || 'Failed to reload models');
+      }
+      
+      let msg = 'Models reloaded successfully.';
+      if (data.vram_allocated_mb) {
+        msg += ` VRAM: ${data.vram_allocated_mb}MB`;
+      }
+      alert(msg);
+      
+    } catch (err) {
+      console.error(err);
+      alert(`Error reloading models: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsReloadingModels(false);
     }
   };
 
@@ -552,11 +680,13 @@ function App() {
                 onSave={() => {}}
                 onExport={() => setShowExportDialog(true)}
                 onLayerDecompose={() => setShowLayerDecomposeDialog(true)}
+                onReloadModels={handleReloadModels}
                 onUndo={handleUndo}
                 onRedo={handleRedo}
                 canUndo={historyIndex > 0}
                 canRedo={historyIndex < history.length - 1}
                 fileName={baseImage ? `image-${baseImage.image_id.slice(0,6)}` : undefined}
+                isReloadingModels={isReloadingModels}
             />
         </div>
       </div>
@@ -606,7 +736,7 @@ function App() {
             </div>
 
             {/* Panel Content */}
-            <div className="flex-1 overflow-hidden relative">
+            <div className="flex-1 overflow-hidden relative flex flex-col">
                 {rightPanelTab === 'layers' ? (
                     <LayerList
                         layers={layers}
@@ -626,8 +756,11 @@ function App() {
                     <Properties
                         selectedLayer={selectedLayer}
                         onUpdate={(updates) => selectedLayerId && handleLayerUpdate(selectedLayerId, updates)}
+                        onApplyEdgeCleanup={handleApplyEdgeCleanup}
                         onRestore={handleRestore}
                         isRestoring={isRestoring}
+                        restoreProgress={restoreProgress}
+                        isApplyingEdgeCleanup={isApplyingEdgeCleanup}
                     />
                 )}
             </div>
