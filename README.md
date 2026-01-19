@@ -100,34 +100,6 @@ Common environment variables:
 
 ## Post-processing
 
-### Object Restoration (Object-Level, Offline)
-
-The Properties panel includes **Object Restoration**, which reconstructs missing/occluded regions of the *selected object layer* (RGBA). This is object-level completion (inpainting/fill) and **never modifies the base image**.
-
-#### Engines
-- `sd15_inpaint` (Stable Diffusion v1.5 Inpainting) — Quality: Good / Speed: Fast (~6GB+ VRAM)
-- `kandinsky22_inpaint` (Kandinsky 2.2 Inpainting) — Quality: Good / Speed: Medium (~10GB+ VRAM)
-- `sdxl_inpaint` (SDXL Inpainting) — Quality: Very good / Speed: Slow (~16GB+ VRAM)
-
-#### Offline model caching & Setup
-The backend uses `diffusers` with `local_files_only=True`. To run offline, cache weights once while online.
-
-**Precache Script:**
-Run the provided script to download and cache all necessary restoration models:
-```bash
-python precache_diffusion_restore_models.py
-```
-
-Recommended environment variables:
-- `HF_HOME`: set Hugging Face cache directory
-- `HF_HUB_OFFLINE=1`: force offline mode after caching
-
-If a model isn't cached, `/restore_object` will return HTTP 503 with a message indicating the weights are missing.
-
-#### Troubleshooting
-- **Missing weights (503)**: "Weights not available offline". Run the precache script while online.
-- **CUDA OOM (500)**: Lower `steps` in Advanced Settings, reduce `resize_long_edge` (e.g. 768), or switch to `sd15_inpaint`.
-
 ### Edge Cleanup
 - Toggle per layer in the right-side Properties panel.
 - **Defaults**:
@@ -155,7 +127,6 @@ If a model isn't cached, `/restore_object` will return HTTP 503 with a message i
 | `/upload` | POST | Upload original image, returns `image_id`, dimensions, URL |
 | `/segment` | POST | Interactive segmentation (point/box/text prompts) |
 | `/segment-all` | POST | Auto-segment all objects in image |
-| `/restore_object` | POST | Object-level diffusion restoration (SD/Kandinsky/SDXL) |
 | `/object_edge_cleanup` | POST | Apply edge cleaning to an object asset |
 | `/layer_decompose` | POST | Qwen-based auto decomposition into RGBA layers |
 | `/reload_models` | POST | Clear GPU memory and reset model states |
