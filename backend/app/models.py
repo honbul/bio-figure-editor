@@ -93,43 +93,6 @@ class ObjectEdgeCleanupResponse(BaseModel):
     object_url: str
 
 
-class ObjectRestoreRequest(BaseModel):
-    object_asset_id: str
-    strength: int = Field(25, ge=0, le=100)
-
-
-class ObjectRestoreResponse(BaseModel):
-    object_asset_id: str
-    object_url: str
-    delta_mask_asset_id: str | None = None
-    delta_mask_url: str | None = None
-
-
-class RestoreObjectParams(BaseModel):
-    steps: int | None = Field(None, ge=1, le=200)
-    guidance_scale: float | None = Field(None, ge=0.0, le=50.0)
-    strength: float | None = Field(None, ge=0.0, le=1.0)
-    seed: int | None = None
-    resize_long_edge: int | None = Field(None, ge=64, le=2048)
-
-
-class RestoreObjectRequest(BaseModel):
-    layer_id: str
-    engine: str = Field(
-        ...,
-        pattern="^(sd15_inpaint|sdxl_inpaint|kandinsky22_inpaint)$",
-    )
-    prompt: str | None = None
-    params: RestoreObjectParams | None = None
-    restore_mask_asset_id: str | None = None
-
-
-class RestoreObjectResponse(BaseModel):
-    restored_layer_asset_id: str
-    preview_url: str
-    metadata: dict[str, object]
-
-
 class ExportRequest(BaseModel):
     base_image_id: str
     layers: list[ExportLayer]
@@ -153,15 +116,50 @@ class DecomposedLayer(BaseModel):
     confidence: float | None = None
 
 
+class LayerDecomposeResponse(BaseModel):
+    layers: list[DecomposedLayer]
+    composite_preview_asset_id: str | None = None
+    composite_preview_url: str | None = None
+    cached: bool = False
+    timing_ms: int | None = None
+
+
+class QwenWarmupRequest(BaseModel):
+    preset: str = Field("fast", pattern="^(fast|balanced|best)$")
+    num_layers: int = Field(4, ge=1, le=32)
+
+
+class QwenWarmupResponse(BaseModel):
+    ok: bool
+    detail: str
+    ram_rss_mb: int | None = None
+    cuda: bool = False
+    vram_allocated_mb: int | None = None
+    vram_reserved_mb: int | None = None
+
+
+class ReloadModelsResponse(BaseModel):
+    ok: bool
+    detail: str
+    cuda: bool = False
+    vram_allocated_mb: int | None = None
+    vram_reserved_mb: int | None = None
+
+
 class SamRefineRequest(BaseModel):
-    base_image_id: str
+    # mode="base": refine prompts on the base image
+    # mode="layer": refine prompts on a transformed layer rendered onto base canvas
     mode: str = Field("base", pattern="^(base|layer)$")
+
+    base_image_id: str
+
     layer_asset_id: str | None = None
     layer_x: float | None = None
     layer_y: float | None = None
     layer_scale_x: float | None = None
     layer_scale_y: float | None = None
     layer_rotation_deg: float | None = None
+
     points: list[PointPrompt] = []
     box_xyxy: list[int] | None = None
     text_prompt: str | None = None
@@ -170,32 +168,70 @@ class SamRefineRequest(BaseModel):
     edge_cleanup: EdgeCleanupSettings | None = None
 
 
-class QwenWarmupRequest(BaseModel):
-    preset: str = Field("fast", pattern="^(fast|balanced|best)$")
-    num_layers: int = Field(2, ge=1, le=32)
+class AssetInfo(BaseModel):
+    asset_id: str
+    url: str
 
 
-class QwenWarmupResponse(BaseModel):
-    ok: bool
-    detail: str
-    ram_rss_mb: int | None = None
-    cuda: bool | None = None
-    vram_allocated_mb: int | None = None
-    vram_reserved_mb: int | None = None
+class RoiSplitRequest(BaseModel):
+    base_image_id: str
+    roi_mask_asset_id: str
+    engine: str = Field(
+        "sdxl_inpaint",
+        pattern="^(sdxl_inpaint)$",
+    )
+    fg_point: PointPrompt | None = None
+    bg_point: PointPrompt | None = None
+    prompt: str | None = None
+    steps: int | None = Field(None, ge=1, le=200)
+    guidance_scale: float | None = Field(None, ge=0.0, le=50.0)
+    seed: int | None = None
+    resize_long_edge: int | None = Field(None, ge=64, le=2048)
 
 
-class ReloadModelsResponse(BaseModel):
-    ok: bool
-    detail: str
-    cuda: bool | None = None
-    vram_allocated_mb: int | None = None
-    vram_reserved_mb: int | None = None
+class RoiSplitLayer(BaseModel):
+    layer_name: str
+    rgba_asset_id: str
+    rgba_url: str
+    bbox: list[int]
 
 
-class LayerDecomposeResponse(BaseModel):
-    layers: list[DecomposedLayer]
-    composite_preview_asset_id: str | None = None
-    composite_preview_url: str | None = None
+class RoiSplitResponse(BaseModel):
+    layers: list[RoiSplitLayer]
+    cached: bool = False
+    timing_ms: int | None = None
+
+
+class OverlapSplitRequest(BaseModel):
+    base_image_id: str
+    mask_a_asset_id: str
+    mask_b_asset_id: str
+    engine: str = Field("sdxl_inpaint", pattern="^(sdxl_inpaint)$")
+    prompt_a: str | None = None
+    prompt_b: str | None = None
+    steps: int | None = Field(None, ge=1, le=200)
+    guidance_scale: float | None = Field(None, ge=0.0, le=50.0)
+    seed: int | None = None
+    resize_long_edge: int | None = Field(None, ge=64, le=2048)
+
+
+class OverlapSplitResponse(BaseModel):
+    layers: list[RoiSplitLayer]
+    cached: bool = False
+    timing_ms: int | None = None
+
+
+class DecomposeAreaRequest(BaseModel):
+    base_image_id: str
+    roi_box: list[int] = Field(..., min_length=4, max_length=4)
+    num_layers: int | None = Field(5, ge=1, le=20)
+    steps: int | None = Field(None, ge=1, le=200)
+    guidance_scale: float | None = Field(None, ge=0.0, le=50.0)
+    seed: int | None = None
+
+
+class DecomposeAreaResponse(BaseModel):
+    layers: list[RoiSplitLayer]
     cached: bool = False
     timing_ms: int | None = None
 

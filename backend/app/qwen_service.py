@@ -35,12 +35,22 @@ class QwenLayeredService:
         self._pipeline = None
 
     def reset(self) -> None:
+        pipeline = self._pipeline
         self._pipeline = None
         self._cache.clear()
+
         try:
+            import gc
             import torch
 
+            del pipeline
+            gc.collect()
+
             if torch.cuda.is_available():
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
                 torch.cuda.empty_cache()
         except Exception:
             pass
@@ -138,6 +148,30 @@ class QwenLayeredService:
             raise HTTPException(status_code=503, detail="torch is not installed")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        quantization_config = None
+
+        if device == "cuda":
+            try:
+                from diffusers.quantizers.pipe_quant_config import (
+                    PipelineQuantizationConfig,
+                )
+                from diffusers.quantizers.quantization_config import TorchAoConfig
+                from torchao.quantization import Float8WeightOnlyConfig
+
+                quantization_config = PipelineQuantizationConfig(
+                    quant_mapping={
+                        "transformer": TorchAoConfig(Float8WeightOnlyConfig())
+                    }
+                )
+            except Exception as e:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "FP8 quantization requires torchao. "
+                        "Install torchao or disable CUDA. "
+                        f"Error: {e}"
+                    ),
+                )
 
         pipeline = self._pipeline
         if pipeline is None:
@@ -147,6 +181,7 @@ class QwenLayeredService:
                     "Qwen/Qwen-Image-Layered",
                     local_files_only=True,
                     low_cpu_mem_usage=True,
+                    quantization_config=quantization_config,
                     torch_dtype=torch.bfloat16 if device == "cuda" else None,
                     device_map="balanced" if device == "cuda" else None,
                 )

@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from .exporter import build_export_zip, compose_image
+from .layer_render import render_layer_to_base_canvas
 from .models import (
+    DecomposeAreaRequest,
+    DecomposeAreaResponse,
     ExportRequest,
     ExportResponse,
     ImageInfo,
@@ -18,34 +23,34 @@ from .models import (
     LayerDecomposeResponse,
     ObjectEdgeCleanupRequest,
     ObjectEdgeCleanupResponse,
-    ObjectRestoreRequest,
-    ObjectRestoreResponse,
+    OverlapSplitRequest,
+    OverlapSplitResponse,
     QwenWarmupRequest,
     QwenWarmupResponse,
     ReloadModelsResponse,
-    RestoreObjectRequest,
-    RestoreObjectResponse,
-    SamRefineRequest,
-    SegmentRequest,
-    SegmentResponse,
-    SegmentAllRequest,
-    SegmentAllResponse,
     RestoreRequest,
     RestoreResponse,
+    RoiSplitLayer,
+    RoiSplitRequest,
+    RoiSplitResponse,
+    SamRefineRequest,
+    SegmentAllRequest,
+    SegmentAllResponse,
+    SegmentRequest,
+    SegmentResponse,
 )
 from .postprocess import (
     EdgeCleanupParams,
     RestoreParams,
     clean_rgba_edges,
     restore_background,
-    restore_object_rgba,
 )
-from .layer_render import render_layer_to_base_canvas
 from .qwen_service import QwenLayeredService
 from .sam3_service import Sam3Service
 from .storage import Storage, get_api_base_url
-from backend.services.restore_router import RestoreObjectService
-
+from backend.services.decompose_area import DecomposeAreaService
+from backend.services.overlap_split import OverlapSplitService
+from backend.services.roi_split import RoiSplitService
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "backend" / "data"
@@ -53,11 +58,9 @@ DATA_DIR = ROOT_DIR / "backend" / "data"
 storage = Storage(DATA_DIR)
 sam3_service = Sam3Service()
 qwen_service = QwenLayeredService(storage)
-restore_object_service = RestoreObjectService(storage)
-
-from fastapi.staticfiles import StaticFiles
-
-# ... existing code ...
+overlap_split_service = OverlapSplitService(storage)
+roi_split_service = RoiSplitService(storage)
+decompose_area_service = DecomposeAreaService(storage, sam3_service)
 
 app = FastAPI(title="BioSeg")
 app.add_middleware(
@@ -108,9 +111,19 @@ def reload_models() -> ReloadModelsResponse:
     try:
         sam3_service.reset()
         qwen_service.reset()
-        restore_object_service.reset()
+        overlap_split_service.reset()
+        decompose_area_service.reset()
 
+        import gc
         import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
 
         cuda = torch.cuda.is_available()
         vram_alloc_mb = None
@@ -451,51 +464,183 @@ def object_edge_cleanup(req: ObjectEdgeCleanupRequest) -> ObjectEdgeCleanupRespo
     )
 
 
-@app.post("/object_restore", response_model=ObjectRestoreResponse)
-def object_restore(req: ObjectRestoreRequest) -> ObjectRestoreResponse:
-    object_path = storage.asset_path(req.object_asset_id, ".png")
-    if not object_path.exists():
-        raise HTTPException(status_code=404, detail="object asset not found")
+@app.post("/overlap_split", response_model=OverlapSplitResponse)
+def overlap_split(req: OverlapSplitRequest) -> OverlapSplitResponse:
+    base_image_path = storage.image_path(req.base_image_id)
+    if not base_image_path.exists():
+        raise HTTPException(status_code=404, detail="base image not found")
 
-    object_rgba = Image.open(object_path).convert("RGBA")
-    restored_rgba, delta_mask_u8 = restore_object_rgba(
-        np.asarray(object_rgba), strength=req.strength
+    mask_a_path = storage.asset_path(req.mask_a_asset_id, ".png")
+    if not mask_a_path.exists():
+        mask_a_path = storage.image_path(req.mask_a_asset_id)
+
+    mask_b_path = storage.asset_path(req.mask_b_asset_id, ".png")
+    if not mask_b_path.exists():
+        mask_b_path = storage.image_path(req.mask_b_asset_id)
+
+    if not mask_a_path.exists():
+        raise HTTPException(status_code=404, detail="mask A asset not found")
+    if not mask_b_path.exists():
+        raise HTTPException(status_code=404, detail="mask B asset not found")
+
+    base_image = Image.open(base_image_path).convert("RGB")
+    mask_a = Image.open(mask_a_path).convert("L")
+    mask_b = Image.open(mask_b_path).convert("L")
+
+    if mask_a.size != base_image.size:
+        mask_a = mask_a.resize(base_image.size, resample=0)
+    if mask_b.size != base_image.size:
+        mask_b = mask_b.resize(base_image.size, resample=0)
+
+    params_in: dict[str, object] = {
+        "steps": req.steps,
+        "guidance_scale": req.guidance_scale,
+        "seed": req.seed,
+        "resize_long_edge": req.resize_long_edge,
+    }
+    params: dict[str, object] = {k: v for k, v in params_in.items() if v is not None}
+
+    try:
+        result = overlap_split_service.split_overlap(
+            base_image,
+            mask_a,
+            mask_b,
+            req.engine,
+            params,
+            req.prompt_a,
+            req.prompt_b,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Overlap split failed: {e}")
+
+    layers = [
+        RoiSplitLayer(
+            layer_name="Object A (Completed)",
+            rgba_asset_id=result.layer_a_asset_id,
+            rgba_url=_asset_url(result.layer_a_asset_id),
+            bbox=list(result.layer_a_bbox),
+        ),
+        RoiSplitLayer(
+            layer_name="Object B (Completed)",
+            rgba_asset_id=result.layer_b_asset_id,
+            rgba_url=_asset_url(result.layer_b_asset_id),
+            bbox=list(result.layer_b_bbox),
+        ),
+    ]
+
+    return OverlapSplitResponse(
+        layers=layers,
+        cached=result.cached,
+        timing_ms=result.timing_ms,
     )
 
-    out_asset_id = storage.new_asset_id()
-    out_path = storage.asset_path(out_asset_id, ".png")
-    Image.fromarray(restored_rgba, mode="RGBA").save(out_path, format="PNG")
 
-    delta_asset_id = storage.new_asset_id()
-    delta_path = storage.asset_path(delta_asset_id, ".png")
-    delta_rgba = np.zeros(
-        (delta_mask_u8.shape[0], delta_mask_u8.shape[1], 4), dtype=np.uint8
+@app.post("/roi_split", response_model=RoiSplitResponse)
+def roi_split(req: RoiSplitRequest) -> RoiSplitResponse:
+    base_image_path = storage.image_path(req.base_image_id)
+    if not base_image_path.exists():
+        raise HTTPException(status_code=404, detail="base image not found")
+
+    roi_mask_path = storage.asset_path(req.roi_mask_asset_id, ".png")
+    if not roi_mask_path.exists():
+        roi_mask_path = storage.image_path(req.roi_mask_asset_id)
+
+    if not roi_mask_path.exists():
+        raise HTTPException(status_code=404, detail="roi mask asset not found")
+
+    base_image = Image.open(base_image_path).convert("RGB")
+    roi_mask = Image.open(roi_mask_path).convert("L")
+
+    if roi_mask.size != base_image.size:
+        roi_mask = roi_mask.resize(base_image.size, resample=0)
+
+    params_in: dict[str, object] = {
+        "steps": req.steps,
+        "guidance_scale": req.guidance_scale,
+        "seed": req.seed,
+        "resize_long_edge": req.resize_long_edge,
+    }
+    params: dict[str, object] = {k: v for k, v in params_in.items() if v is not None}
+
+    fg_point = (int(req.fg_point.x), int(req.fg_point.y)) if req.fg_point else None
+    bg_point = (int(req.bg_point.x), int(req.bg_point.y)) if req.bg_point else None
+
+    try:
+        result = roi_split_service.split(
+            base_image,
+            roi_mask,
+            req.engine,
+            params,
+            fg_point=fg_point,
+            bg_point=bg_point,
+            prompt=req.prompt,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ROI split failed: {e}")
+
+    layers = [
+        RoiSplitLayer(
+            layer_name="Background (Restored)",
+            rgba_asset_id=result.bg_asset_id,
+            rgba_url=_asset_url(result.bg_asset_id),
+            bbox=list(result.bg_bbox),
+        ),
+        RoiSplitLayer(
+            layer_name="Foreground (Extracted)",
+            rgba_asset_id=result.fg_asset_id,
+            rgba_url=_asset_url(result.fg_asset_id),
+            bbox=list(result.fg_bbox),
+        ),
+    ]
+
+    return RoiSplitResponse(
+        layers=layers,
+        cached=result.cached,
+        timing_ms=result.timing_ms,
     )
-    delta_rgba[:, :, 3] = delta_mask_u8
-    Image.fromarray(delta_rgba, mode="RGBA").save(delta_path, format="PNG")
-
-    return ObjectRestoreResponse(
-        object_asset_id=out_asset_id,
-        object_url=_asset_url(out_asset_id),
-        delta_mask_asset_id=delta_asset_id,
-        delta_mask_url=_asset_url(delta_asset_id),
-    )
 
 
-@app.post("/restore_object", response_model=RestoreObjectResponse)
-def restore_object(req: RestoreObjectRequest) -> RestoreObjectResponse:
-    params = {} if req.params is None else req.params.model_dump(exclude_none=True)
-    result = restore_object_service.restore(
-        layer_id=req.layer_id,
-        engine=req.engine,
-        prompt=req.prompt,
-        params=params,
-        restore_mask_asset_id=req.restore_mask_asset_id,
-    )
-    return RestoreObjectResponse(
-        restored_layer_asset_id=result.asset_id,
-        preview_url=result.url,
-        metadata=result.metadata,
+@app.post("/decompose_area", response_model=DecomposeAreaResponse)
+def decompose_area(req: DecomposeAreaRequest) -> DecomposeAreaResponse:
+    base_image_path = storage.image_path(req.base_image_id)
+    if not base_image_path.exists():
+        raise HTTPException(status_code=404, detail="base image not found")
+
+    base_image = Image.open(base_image_path).convert("RGB")
+
+    params_in: dict[str, object] = {
+        "num_layers": req.num_layers,
+        "steps": req.steps,
+        "guidance_scale": req.guidance_scale,
+        "seed": req.seed,
+    }
+    params: dict[str, object] = {k: v for k, v in params_in.items() if v is not None}
+
+    try:
+        result = decompose_area_service.decompose_area(
+            base_image,
+            req.roi_box,
+            req.base_image_id,
+            params,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Decompose area failed: {e}")
+
+    layers = []
+    for l in result.layers:
+        layers.append(
+            RoiSplitLayer(
+                layer_name=str(l["layer_name"]),
+                rgba_asset_id=str(l["rgba_asset_id"]),
+                rgba_url=_asset_url(str(l["rgba_asset_id"])),
+                bbox=[int(x) for x in cast(list[int], l["bbox"])],
+            )
+        )
+
+    return DecomposeAreaResponse(
+        layers=layers,
+        cached=result.cached,
+        timing_ms=result.timing_ms,
     )
 
 
