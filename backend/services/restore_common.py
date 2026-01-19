@@ -24,6 +24,24 @@ class RestoreRunMetadata:
     cached: bool
 
 
+def extract_int(v: object | None, default: int | None = None) -> int | None:
+    if v is None:
+        return default
+    try:
+        return int(str(v))
+    except (ValueError, TypeError):
+        return default
+
+
+def extract_float(v: object | None, default: float | None = None) -> float | None:
+    if v is None:
+        return default
+    try:
+        return float(str(v))
+    except (ValueError, TypeError):
+        return default
+
+
 def pick_device() -> str:
     try:
         import torch
