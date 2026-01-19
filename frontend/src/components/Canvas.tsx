@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Stage, Layer as KonvaLayer, Image as KonvaImage, Transformer, Rect } from 'react-konva';
+import { Stage, Layer as KonvaLayer, Image as KonvaImage, Transformer, Rect, Line, Circle as KonvaCircle } from 'react-konva';
 import useImage from 'use-image';
 import Konva from 'konva';
 import { Layer, Tool } from '@/types';
@@ -14,6 +14,18 @@ interface CanvasProps {
   onLayerSelect: (id: string | null) => void;
   onLayerUpdate: (id: string, updates: Partial<Layer>) => void;
   onSegment: (x: number, y: number, box?: number[], text?: string) => void;
+  roiMode?: 'rect' | 'poly';
+  roiBox?: [number, number, number, number] | null;
+  roiPoints?: {x: number, y: number}[];
+  onRoiBoxChange?: (box: [number, number, number, number] | null) => void;
+  onRoiPointsChange?: (points: {x: number, y: number}[]) => void;
+  roiHintMode?: 'fg' | 'bg' | null;
+  onRoiHintPoint?: (mode: 'fg' | 'bg', point: {x: number, y: number}) => void;
+  roiFgPoint?: {x: number, y: number} | null;
+  roiBgPoint?: {x: number, y: number} | null;
+  overlapMaskA?: { box: [number, number, number, number] | null; points: {x: number, y: number}[] };
+  overlapMaskB?: { box: [number, number, number, number] | null; points: {x: number, y: number}[] };
+  overlapActiveMask?: 'A' | 'B';
 }
 
 const URLImage = ({ src, layerProps, isSelected, onSelect, onChange, draggable, opacity, locked }: any) => {
@@ -88,6 +100,18 @@ export function Canvas({
   onLayerSelect,
   onLayerUpdate,
   onSegment,
+  roiMode,
+  roiBox,
+  roiPoints,
+  onRoiBoxChange,
+  onRoiPointsChange,
+  roiHintMode,
+  onRoiHintPoint,
+  roiFgPoint,
+  roiBgPoint,
+  overlapMaskA,
+  overlapMaskB,
+  overlapActiveMask,
 }: CanvasProps) {
   const [stageScale, setStageScale] = useState(1);
   const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
@@ -152,7 +176,7 @@ export function Canvas({
   };
 
   const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (activeTool === 'box') {
+    if (activeTool === 'box' || (activeTool === 'roi' && roiMode === 'rect') || (activeTool === 'overlap' && roiMode === 'rect') || activeTool === 'decompose') {
         const pos = getRelativePointerPosition(e.target.getStage()!);
         if (pos) {
             setIsDrawingBox(true);
@@ -163,7 +187,7 @@ export function Canvas({
   };
 
   const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (activeTool === 'box' && isDrawingBox) {
+    if ((activeTool === 'box' || (activeTool === 'roi' && roiMode === 'rect') || (activeTool === 'overlap' && roiMode === 'rect') || activeTool === 'decompose') && isDrawingBox) {
         const pos = getRelativePointerPosition(e.target.getStage()!);
         if (pos) {
             setBoxEnd(pos);
@@ -172,7 +196,7 @@ export function Canvas({
   };
 
   const handleMouseUp = (_e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (activeTool === 'box' && isDrawingBox && boxStart && boxEnd && baseImage) {
+    if ((activeTool === 'box' || (activeTool === 'roi' && roiMode === 'rect') || (activeTool === 'overlap' && roiMode === 'rect') || activeTool === 'decompose') && isDrawingBox && boxStart && boxEnd && baseImage) {
         setIsDrawingBox(false);
         
         // Normalize box
@@ -183,9 +207,17 @@ export function Canvas({
         
         // Check bounds and size
         if (x2 - x1 > 5 && y2 - y1 > 5) {
-             // Send box prompt
-             // xyxy format
-             onSegment(0, 0, [x1, y1, x2, y2]);
+             if (activeTool === 'box') {
+                 // Send box prompt
+                 // xyxy format
+                 onSegment(0, 0, [x1, y1, x2, y2]);
+             } else if (activeTool === 'roi' && onRoiBoxChange) {
+                 onRoiBoxChange([x1, y1, x2, y2]);
+             } else if (activeTool === 'overlap' && onRoiBoxChange) {
+                 onRoiBoxChange([x1, y1, x2, y2]);
+             } else if (activeTool === 'decompose' && onRoiBoxChange) {
+                 onRoiBoxChange([x1, y1, x2, y2]);
+             }
         }
         
         setBoxStart(null);
@@ -213,6 +245,33 @@ export function Canvas({
         // Basic bounds check
         if (x >= 0 && y >= 0 && x <= (baseImage.width || 0) && y <= (baseImage.height || 0)) {
              onSegment(x, y);
+        }
+      }
+
+      // Handle ROI Polygon click
+      if ((activeTool === 'roi' || activeTool === 'overlap') && baseImage) {
+        const stage = e.target.getStage();
+        if (!stage) return;
+        
+        const pointer = stage.getPointerPosition();
+        if (!pointer) return;
+
+        // Convert pointer to image coordinates
+        const x = (pointer.x - stage.x()) / stage.scaleX();
+        const y = (pointer.y - stage.y()) / stage.scaleY();
+
+        // Check if inside image bounds
+        if (x >= 0 && y >= 0 && x <= (baseImage.width || 0) && y <= (baseImage.height || 0)) {
+          // If hint mode is armed, capture hint point instead of drawing
+          if (roiHintMode && onRoiHintPoint) {
+            onRoiHintPoint(roiHintMode, { x, y });
+            return;
+          }
+
+          // Otherwise handle polygon drawing
+          if (roiMode === 'poly' && onRoiPointsChange) {
+            onRoiPointsChange([...(roiPoints || []), { x, y }]);
+          }
         }
       }
     }
@@ -246,7 +305,7 @@ export function Canvas({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         ref={stageRef}
-        className={activeTool === 'pan' ? 'cursor-grab active:cursor-grabbing' : activeTool === 'segment' ? 'cursor-crosshair' : activeTool === 'box' ? 'cursor-crosshair' : 'cursor-default'}
+        className={activeTool === 'pan' ? 'cursor-grab active:cursor-grabbing' : (activeTool === 'segment' || activeTool === 'box' || activeTool === 'roi') ? 'cursor-crosshair' : 'cursor-default'}
       >
         <KonvaLayer>
           {baseImage && (
@@ -282,18 +341,172 @@ export function Canvas({
             );
           })}
           
-          {/* Box selection overlay */}
-          {activeTool === 'box' && isDrawingBox && boxStart && boxEnd && (
+          {/* Box selection overlay (Drawing) */}
+          {(activeTool === 'box' || (activeTool === 'roi' && roiMode === 'rect') || (activeTool === 'overlap' && roiMode === 'rect') || activeTool === 'decompose') && isDrawingBox && boxStart && boxEnd && (
              <Rect
                 x={Math.min(boxStart.x, boxEnd.x)}
                 y={Math.min(boxStart.y, boxEnd.y)}
                 width={Math.abs(boxEnd.x - boxStart.x)}
                 height={Math.abs(boxEnd.y - boxStart.y)}
-                stroke="#8b5cf6"
+                stroke={activeTool === 'roi' ? "#10b981" : activeTool === 'overlap' ? (overlapActiveMask === 'A' ? "#3b82f6" : "#f97316") : activeTool === 'decompose' ? "#06b6d4" : "#8b5cf6"}
                 strokeWidth={2 / stageScale}
-                fill="rgba(139, 92, 246, 0.2)"
+                fill={activeTool === 'roi' ? "rgba(16, 185, 129, 0.2)" : activeTool === 'overlap' ? (overlapActiveMask === 'A' ? "rgba(59, 130, 246, 0.2)" : "rgba(249, 115, 22, 0.2)") : activeTool === 'decompose' ? "rgba(6, 182, 212, 0.2)" : "rgba(139, 92, 246, 0.2)"}
                 listening={false}
              />
+          )}
+
+          {/* Persistent ROI Box */}
+          {activeTool === 'roi' && roiMode === 'rect' && roiBox && !isDrawingBox && (
+             <Rect
+                x={roiBox[0]}
+                y={roiBox[1]}
+                width={roiBox[2] - roiBox[0]}
+                height={roiBox[3] - roiBox[1]}
+                stroke="#10b981"
+                strokeWidth={2 / stageScale}
+                fill="rgba(16, 185, 129, 0.1)"
+                listening={false}
+             />
+          )}
+
+          {/* Persistent Decompose Box */}
+          {activeTool === 'decompose' && roiBox && !isDrawingBox && (
+             <Rect
+                x={roiBox[0]}
+                y={roiBox[1]}
+                width={roiBox[2] - roiBox[0]}
+                height={roiBox[3] - roiBox[1]}
+                stroke="#06b6d4"
+                strokeWidth={2 / stageScale}
+                fill="rgba(6, 182, 212, 0.1)"
+                listening={false}
+             />
+          )}
+
+          {/* Persistent ROI Polygon */}
+          {activeTool === 'roi' && roiMode === 'poly' && roiPoints && roiPoints.length > 0 && (
+             <>
+                <Line
+                  points={roiPoints.flatMap(p => [p.x, p.y])}
+                  stroke="#10b981"
+                  strokeWidth={2 / stageScale}
+                  closed={roiPoints.length > 2}
+                  fill={roiPoints.length > 2 ? "rgba(16, 185, 129, 0.1)" : undefined}
+                  listening={false}
+                />
+                {roiPoints.map((p, i) => (
+                  <KonvaCircle
+                    key={i}
+                    x={p.x}
+                    y={p.y}
+                    radius={4 / stageScale}
+                    fill="#10b981"
+                    listening={false}
+                  />
+                ))}
+             </>
+          )}
+
+          {/* Overlap Masks */}
+          {activeTool === 'overlap' && overlapMaskA && (
+             <>
+                {overlapMaskA.box && (
+                    <Rect
+                        x={overlapMaskA.box[0]}
+                        y={overlapMaskA.box[1]}
+                        width={overlapMaskA.box[2] - overlapMaskA.box[0]}
+                        height={overlapMaskA.box[3] - overlapMaskA.box[1]}
+                        stroke="#3b82f6" // Blue
+                        strokeWidth={2 / stageScale}
+                        fill={overlapActiveMask === 'A' ? "rgba(59, 130, 246, 0.2)" : "rgba(59, 130, 246, 0.1)"}
+                        listening={false}
+                    />
+                )}
+                {overlapMaskA.points.length > 0 && (
+                    <>
+                        <Line
+                            points={overlapMaskA.points.flatMap(p => [p.x, p.y])}
+                            stroke="#3b82f6"
+                            strokeWidth={2 / stageScale}
+                            closed={overlapMaskA.points.length > 2}
+                            fill={overlapMaskA.points.length > 2 ? (overlapActiveMask === 'A' ? "rgba(59, 130, 246, 0.2)" : "rgba(59, 130, 246, 0.1)") : undefined}
+                            listening={false}
+                        />
+                        {overlapMaskA.points.map((p, i) => (
+                          <KonvaCircle
+                            key={`a-${i}`}
+                            x={p.x}
+                            y={p.y}
+                            radius={4 / stageScale}
+                            fill="#3b82f6"
+                            listening={false}
+                          />
+                        ))}
+                    </>
+                )}
+             </>
+          )}
+
+          {activeTool === 'overlap' && overlapMaskB && (
+             <>
+                {overlapMaskB.box && (
+                    <Rect
+                        x={overlapMaskB.box[0]}
+                        y={overlapMaskB.box[1]}
+                        width={overlapMaskB.box[2] - overlapMaskB.box[0]}
+                        height={overlapMaskB.box[3] - overlapMaskB.box[1]}
+                        stroke="#f97316" // Orange
+                        strokeWidth={2 / stageScale}
+                        fill={overlapActiveMask === 'B' ? "rgba(249, 115, 22, 0.2)" : "rgba(249, 115, 22, 0.1)"}
+                        listening={false}
+                    />
+                )}
+                {overlapMaskB.points.length > 0 && (
+                    <>
+                        <Line
+                            points={overlapMaskB.points.flatMap(p => [p.x, p.y])}
+                            stroke="#f97316"
+                            strokeWidth={2 / stageScale}
+                            closed={overlapMaskB.points.length > 2}
+                            fill={overlapMaskB.points.length > 2 ? (overlapActiveMask === 'B' ? "rgba(249, 115, 22, 0.2)" : "rgba(249, 115, 22, 0.1)") : undefined}
+                            listening={false}
+                        />
+                        {overlapMaskB.points.map((p, i) => (
+                          <KonvaCircle
+                            key={`b-${i}`}
+                            x={p.x}
+                            y={p.y}
+                            radius={4 / stageScale}
+                            fill="#f97316"
+                            listening={false}
+                          />
+                        ))}
+                    </>
+                )}
+             </>
+          )}
+
+          {activeTool === 'roi' && roiFgPoint && (
+            <KonvaCircle
+              x={roiFgPoint.x}
+              y={roiFgPoint.y}
+              radius={5 / stageScale}
+              fill="#22c55e"
+              stroke="white"
+              strokeWidth={2 / stageScale}
+              listening={false}
+            />
+          )}
+          {activeTool === 'roi' && roiBgPoint && (
+            <KonvaCircle
+              x={roiBgPoint.x}
+              y={roiBgPoint.y}
+              radius={5 / stageScale}
+              fill="#ef4444"
+              stroke="white"
+              strokeWidth={2 / stageScale}
+              listening={false}
+            />
           )}
         </KonvaLayer>
       </Stage>

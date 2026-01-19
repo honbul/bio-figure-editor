@@ -1,31 +1,19 @@
-import { useState } from 'react';
 import { Layer } from '@/types';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Slider } from '@/components/ui/slider';
 import { Button } from '@/components/ui/button';
-import { Move, Maximize, RotateCw, Eye, Lock, RefreshCw, Scissors, ChevronRight, ChevronDown } from 'lucide-react';
+import { Move, Maximize, RotateCw, Eye, Lock, RefreshCw, Scissors } from 'lucide-react';
 
 interface PropertiesProps {
   selectedLayer: Layer | null;
   onUpdate: (updates: Partial<Layer>) => void;
   onApplyEdgeCleanup: () => void;
-  onRestore: (settings: { engine: string; prompt?: string; params?: any }) => void;
-  isRestoring: boolean;
-  restoreProgress: string;
   isApplyingEdgeCleanup: boolean;
 }
 
-export function Properties({ selectedLayer, onUpdate, onApplyEdgeCleanup, onRestore, isRestoring, restoreProgress, isApplyingEdgeCleanup }: PropertiesProps) {
-  const [engine, setEngine] = useState<'sd15_inpaint' | 'kandinsky22_inpaint' | 'sdxl_inpaint'>('sd15_inpaint');
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [prompt, setPrompt] = useState('clean flat scientific diagram, solid colors, sharp edges, no text, no extra symbols');
-  const [steps, setSteps] = useState(30);
-  const [guidanceScale, setGuidanceScale] = useState(7.5);
-  const [seed, setSeed] = useState<number | ''>('');
-  const [resizeLongEdge, setResizeLongEdge] = useState(1024);
-
+export function Properties({ selectedLayer, onUpdate, onApplyEdgeCleanup, isApplyingEdgeCleanup }: PropertiesProps) {
   if (!selectedLayer) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50 p-6 text-center">
@@ -177,138 +165,6 @@ export function Properties({ selectedLayer, onUpdate, onApplyEdgeCleanup, onRest
                     </Button>
                 </>
             )}
-         </div>
-
-
-         <div className="space-y-4 pt-2">
-             <Label className="text-xs uppercase text-muted-foreground font-semibold tracking-wider">Object Restoration</Label>
-             <div className="text-xs text-muted-foreground">
-               Restores missing parts of the object (e.g. occlusion).
-             </div>
-             <div className="text-xs text-amber-500/90 font-medium tracking-wide">
-               Modifies selected object layer only. Does not affect base image.
-             </div>
-
-             <div className="space-y-3">
-                 <div className="space-y-1.5">
-                     <Label className="text-xs">Model Engine</Label>
-                     <select 
-                        value={engine}
-                        onChange={(e) => setEngine(e.target.value as typeof engine)}
-                        className="w-full bg-black/20 border border-white/10 rounded-md px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary/50"
-                     >
-                         <option value="sd15_inpaint">SD v1.5 Inpaint — Quality: Good / Speed: Fast</option>
-                         <option value="kandinsky22_inpaint">Kandinsky 2.2 — Quality: Good / Speed: Medium</option>
-                         <option value="sdxl_inpaint">SDXL Inpaint — Quality: Very good / Speed: Slow</option>
-                     </select>
-
-                 </div>
-
-                 <div className="space-y-1.5">
-                     <Label className="text-xs">Prompt (Optional)</Label>
-                     <Input 
-                        value={prompt}
-                        onChange={(e) => setPrompt(e.target.value)}
-                        placeholder="Describe the object..."
-                        className="bg-black/20 border-white/10 h-7 text-xs"
-                     />
-                 </div>
-
-                 <div className="pt-1">
-                    <button 
-                        onClick={() => setShowAdvanced(!showAdvanced)}
-                        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                        {showAdvanced ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                        Advanced Settings
-                    </button>
-                    
-                    {showAdvanced && (
-                        <div className="space-y-3 pt-3 pl-2 border-l border-white/10 ml-1.5 mt-1">
-                            <div className="space-y-1">
-                                <div className="flex justify-between">
-                                    <Label className="text-[10px]">Steps</Label>
-                                    <span className="text-[10px] text-muted-foreground">{steps}</span>
-                                </div>
-                                <Slider
-                                    value={[steps]}
-                                    min={10}
-                                    max={100}
-                                    step={1}
-                                    onValueChange={(v) => setSteps(v[0])}
-                                    className="py-1"
-                                />
-                            </div>
-                            <div className="space-y-1">
-                                <div className="flex justify-between">
-                                    <Label className="text-[10px]">Guidance Scale</Label>
-                                    <span className="text-[10px] text-muted-foreground">{guidanceScale}</span>
-                                </div>
-                                <Slider
-                                    value={[guidanceScale]}
-                                    min={1}
-                                    max={20}
-                                    step={0.5}
-                                    onValueChange={(v) => setGuidanceScale(v[0])}
-                                    className="py-1"
-                                />
-                            </div>
-                             <div className="space-y-1">
-                                 <Label className="text-[10px]">Seed</Label>
-                                 <Input 
-                                     type="number" 
-                                     placeholder="Random"
-                                     value={seed}
-                                     onChange={(e) => setSeed(e.target.value ? parseInt(e.target.value) : '')}
-                                     className="bg-black/20 border-white/10 h-6 text-[10px]"
-                                 />
-                             </div>
-                             <div className="space-y-1">
-                                 <Label className="text-[10px]">Resize Long Edge</Label>
-                                 <Input 
-                                     type="number" 
-                                     value={resizeLongEdge}
-                                     onChange={(e) => setResizeLongEdge(parseInt(e.target.value))}
-                                     className="bg-black/20 border-white/10 h-6 text-[10px]"
-                                 />
-                             </div>
-                        </div>
-                    )}
-                 </div>
-
-                 <Button
-                    onClick={() => onRestore({
-                        engine,
-                        prompt: prompt || undefined,
-                        params: {
-                            steps,
-                            guidance_scale: guidanceScale,
-                            seed: seed === '' ? undefined : seed,
-                            resize_long_edge: resizeLongEdge
-                        }
-                    })}
-                    disabled={isRestoring}
-                    className="w-full bg-indigo-600 hover:bg-indigo-500 text-white shadow-md border border-indigo-500/20"
-                 >
-                    {isRestoring ? (
-                        <>
-                            <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                            Restoring...
-                        </>
-                    ) : (
-                        <>
-                            <RefreshCw className="h-4 w-4 mr-2" />
-                            Restore occluded parts
-                        </>
-                    )}
-                 </Button>
-
-                 {isRestoring && restoreProgress ? (
-                   <div className="text-xs text-muted-foreground pt-1">
-                     {restoreProgress}
-                   </div>
-                 ) : null}
-            </div>
          </div>
 
 
