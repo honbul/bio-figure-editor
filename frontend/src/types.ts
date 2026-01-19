@@ -1,4 +1,4 @@
-export type Tool = 'select' | 'pan' | 'zoom' | 'segment' | 'text' | 'box';
+export type Tool = 'select' | 'pan' | 'zoom' | 'segment' | 'text' | 'box' | 'roi' | 'overlap' | 'decompose';
 
 export interface ImageInfo {
   image_id: string;
@@ -68,17 +68,6 @@ export interface Layer {
   z_index: number;
 }
 
-export interface RestoreRequest {
-  base_image_id: string;
-  hole_mask_asset_id: string;
-  protect_mask_asset_ids?: string[];
-}
-
-export interface RestoreResponse {
-  restored_asset_id: string;
-  restored_url: string;
-}
-
 export interface ObjectEdgeCleanupRequest {
   object_asset_id: string;
   strength: number;
@@ -89,25 +78,6 @@ export interface ObjectEdgeCleanupRequest {
 export interface ObjectEdgeCleanupResponse {
   object_asset_id: string;
   object_url: string;
-}
-
-export interface ObjectRestoreRequest {
-  layer_id: string;
-  engine: string;
-  prompt?: string;
-  params?: {
-    steps?: number;
-    guidance_scale?: number;
-    seed?: number;
-    resize_long_edge?: number;
-  };
-  restore_mask_asset_id?: string;
-}
-
-export interface ObjectRestoreResponse {
-  restored_layer_asset_id: string;
-  preview_url: string;
-  metadata?: any;
 }
 
 export interface LayerDecomposeRequest {
@@ -130,4 +100,18 @@ export interface DecomposedLayer {
 export interface LayerDecomposeResponse {
   layers: DecomposedLayer[];
   cached: boolean;
+}
+
+export interface RoiSplitRequest {
+  image_id: string;
+  roi_box?: [number, number, number, number];
+  roi_points?: {x: number, y: number}[];
+  engine: string;
+  params?: Record<string, any>;
+  include_background?: boolean;
+}
+
+export interface RoiSplitResponse {
+  layers: DecomposedLayer[];
+  background_layer?: DecomposedLayer;
 }

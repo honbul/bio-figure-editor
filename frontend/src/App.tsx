@@ -3,8 +3,11 @@ import { LeftToolbar } from '@/components/LeftToolbar';
 import { TopBar } from '@/components/TopBar';
 import { LayerList } from '@/components/LayerList';
 import { Properties } from '@/components/Properties';
+import { RoiPanel } from '@/components/RoiPanel';
+import { DecomposePanel } from '@/components/DecomposePanel';
+import { OverlapPanel } from '@/components/OverlapPanel';
 import { Canvas } from '@/components/Canvas';
-import { Layer, ImageInfo, SegmentResponse, LayerDecomposeRequest, LayerDecomposeResponse, Tool, ObjectEdgeCleanupRequest, ObjectEdgeCleanupResponse, ObjectRestoreRequest, ObjectRestoreResponse } from '@/types';
+import { Layer, ImageInfo, SegmentResponse, LayerDecomposeRequest, LayerDecomposeResponse, Tool, ObjectEdgeCleanupRequest, ObjectEdgeCleanupResponse } from '@/types';
 import { API_BASE_URL } from '@/config';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -13,6 +16,8 @@ import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+
+import { rasterizeRoiMask } from '@/utils/rasterizeRoiMask';
 
 function App() {
   const [activeTool, setActiveTool] = useState<Tool>('select');
@@ -25,8 +30,6 @@ function App() {
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [isUploading, setIsUploading] = useState(false);
   const [isSegmenting, setIsSegmenting] = useState(false);
-  const [isRestoring, setIsRestoring] = useState(false);
-  const [restoreProgress, setRestoreProgress] = useState<string>('');
   const [isApplyingEdgeCleanup, setIsApplyingEdgeCleanup] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [showLayerDecomposeDialog, setShowLayerDecomposeDialog] = useState(false);
@@ -40,6 +43,37 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<'layers' | 'properties'>('layers');
+  
+  // ROI State
+  const [roiMode, setRoiMode] = useState<'rect' | 'poly'>('rect');
+  const [roiBox, setRoiBox] = useState<[number, number, number, number] | null>(null);
+  const [roiPoints, setRoiPoints] = useState<{x: number, y: number}[]>([]);
+  const [roiEngine, setRoiEngine] = useState('sdxl_inpaint');
+  const [roiParams, setRoiParams] = useState<Record<string, any>>({ steps: 20, guidance_scale: 6.0, strength: 1.0 });
+  const [roiHintMode, setRoiHintMode] = useState<'fg' | 'bg' | null>(null);
+  const [roiFgPoint, setRoiFgPoint] = useState<{ x: number, y: number } | null>(null);
+  const [roiBgPoint, setRoiBgPoint] = useState<{ x: number, y: number } | null>(null);
+  const [roiPrompt, setRoiPrompt] = useState<string>('');
+  const [isSplitting, setIsSplitting] = useState(false);
+  const [splitProgress, setSplitProgress] = useState('');
+
+  // Overlap State
+  const [overlapMode, setOverlapMode] = useState<'rect' | 'poly'>('rect');
+  const [overlapActiveMask, setOverlapActiveMask] = useState<'A' | 'B'>('A');
+  const [overlapMaskA, setOverlapMaskA] = useState<{ box: [number, number, number, number] | null; points: {x: number, y: number}[] }>({ box: null, points: [] });
+  const [overlapMaskB, setOverlapMaskB] = useState<{ box: [number, number, number, number] | null; points: {x: number, y: number}[] }>({ box: null, points: [] });
+  const [overlapPromptA, setOverlapPromptA] = useState('');
+  const [overlapPromptB, setOverlapPromptB] = useState('');
+  const [overlapEngine, setOverlapEngine] = useState('sdxl_inpaint');
+  const [overlapParams, setOverlapParams] = useState<Record<string, any>>({ steps: 20, guidance_scale: 6.0, strength: 1.0 });
+  const [isOverlapSplitting, setIsOverlapSplitting] = useState(false);
+  const [overlapSplitProgress, setOverlapSplitProgress] = useState('');
+
+  // Decompose Area State
+  const [decomposeBox, setDecomposeBox] = useState<[number, number, number, number] | null>(null);
+  const [decomposeParams, setDecomposeParams] = useState<{ steps: number; guidance_scale: number; seed: number | ''; num_layers: number }>({ steps: 20, guidance_scale: 6.0, seed: '', num_layers: 5 });
+  const [isDecomposingArea, setIsDecomposingArea] = useState(false);
+  const [decomposeAreaProgress, setDecomposeAreaProgress] = useState('');
 
   const selectedLayer = layers.find(l => l.id === selectedLayerId) || null;
 
@@ -57,10 +91,327 @@ function App() {
     setHistoryIndex(newHistory.length - 1);
   }, [history, historyIndex]);
 
-  const updateLayers = (newLayers: Layer[]) => {
+  const updateLayers = useCallback((newLayers: Layer[]) => {
     setLayers(newLayers);
     pushHistory(newLayers);
-  };
+  }, [pushHistory]);
+
+  const handleRoiHintPoint = useCallback((mode: 'fg' | 'bg', point: { x: number, y: number }) => {
+    if (mode === 'fg') {
+      setRoiFgPoint(point);
+    } else {
+      setRoiBgPoint(point);
+    }
+    setRoiHintMode(null);
+  }, []);
+
+  const handleRoiSplit = useCallback(async () => {
+    if (!baseImage) {
+      alert('No base image loaded');
+      return;
+    }
+    if (!roiBox && (!roiPoints || roiPoints.length < 3)) {
+      alert('No ROI defined');
+      return;
+    }
+
+    setIsSplitting(true);
+    setSplitProgress('Rasterizing mask...');
+
+    try {
+      const maskBlob = await rasterizeRoiMask(
+        roiMode,
+        roiBox,
+        roiPoints,
+        baseImage.width,
+        baseImage.height
+      );
+
+      setSplitProgress('Uploading mask...');
+      const fd = new FormData();
+      fd.append('file', maskBlob, 'mask.png');
+
+      const uploadRes = await fetch(`${API_BASE_URL}/upload`, {
+        method: 'POST',
+        body: fd,
+      });
+
+      if (!uploadRes.ok) {
+        throw new Error('Failed to upload ROI mask asset');
+      }
+
+      const maskInfo = await uploadRes.json();
+      const maskAssetId = maskInfo.image_id;
+
+      setSplitProgress('Running ROI Split (this may take a while)...');
+
+      const splitReq: any = {
+        base_image_id: baseImage.image_id,
+        roi_mask_asset_id: maskAssetId,
+        engine: roiEngine,
+        steps: roiParams.steps,
+        guidance_scale: roiParams.guidance_scale,
+        seed: roiParams.seed,
+        resize_long_edge: roiParams.resize_long_edge,
+        prompt: roiPrompt || null,
+      };
+
+      if (roiFgPoint) splitReq.fg_point = { x: roiFgPoint.x, y: roiFgPoint.y, label: 1 };
+      if (roiBgPoint) splitReq.bg_point = { x: roiBgPoint.x, y: roiBgPoint.y, label: 0 };
+
+      const res = await fetch(`${API_BASE_URL}/roi_split`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(splitReq),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`ROI Split failed: ${errText}`);
+      }
+
+      const data = await res.json();
+      setSplitProgress('Finalizing...');
+
+      const newLayers: Layer[] = data.layers.map((l: any, idx: number) => ({
+        id: l.rgba_asset_id,
+        asset_id: l.rgba_asset_id,
+        asset_url: l.rgba_url,
+        name: l.layer_name,
+        x: l.bbox[0],
+        y: l.bbox[1],
+        scale_x: 1,
+        scale_y: 1,
+        rotation_deg: 0,
+        opacity: 1,
+        visible: true,
+        locked: false,
+        z_index: layers.length + 1 + idx,
+        edge_cleanup_enabled: false,
+        edge_cleanup_strength: 50,
+        edge_cleanup_feather_px: 1,
+        edge_cleanup_erode_px: 1,
+      }));
+
+      const updatedLayers = [...layers, ...newLayers];
+      updateLayers(updatedLayers);
+
+      if (newLayers.length > 0) {
+        setSelectedLayerId(newLayers[newLayers.length - 1].id);
+      }
+
+      setRoiBox(null);
+      setRoiPoints([]);
+      setRoiFgPoint(null);
+      setRoiBgPoint(null);
+      setActiveTool('select');
+
+    } catch (err) {
+      console.error(err);
+      alert(err instanceof Error ? err.message : 'Unknown ROI split error');
+    } finally {
+      setIsSplitting(false);
+      setSplitProgress('');
+    }
+  }, [baseImage, roiMode, roiBox, roiPoints, roiEngine, roiParams, roiFgPoint, roiBgPoint, layers, updateLayers]);
+
+  const handleOverlapSplit = useCallback(async () => {
+    if (!baseImage) {
+      alert('No base image loaded');
+      return;
+    }
+    
+    const hasMaskA = !!(overlapMaskA.box || overlapMaskA.points.length >= 3);
+    const hasMaskB = !!(overlapMaskB.box || overlapMaskB.points.length >= 3);
+    
+    if (!hasMaskA || !hasMaskB) {
+      alert('Both Mask A and Mask B must be defined');
+      return;
+    }
+
+    setIsOverlapSplitting(true);
+    setOverlapSplitProgress('Rasterizing masks...');
+
+    try {
+      // Rasterize Mask A
+      const maskABlob = await rasterizeRoiMask(
+        overlapMaskA.box ? 'rect' : 'poly',
+        overlapMaskA.box,
+        overlapMaskA.points,
+        baseImage.width,
+        baseImage.height
+      );
+
+      // Rasterize Mask B
+      const maskBBlob = await rasterizeRoiMask(
+        overlapMaskB.box ? 'rect' : 'poly',
+        overlapMaskB.box,
+        overlapMaskB.points,
+        baseImage.width,
+        baseImage.height
+      );
+
+      setOverlapSplitProgress('Uploading masks...');
+      
+      const fdA = new FormData();
+      fdA.append('file', maskABlob, 'maskA.png');
+      const resA = await fetch(`${API_BASE_URL}/upload`, { method: 'POST', body: fdA });
+      if (!resA.ok) throw new Error('Failed to upload Mask A');
+      const infoA = await resA.json();
+
+      const fdB = new FormData();
+      fdB.append('file', maskBBlob, 'maskB.png');
+      const resB = await fetch(`${API_BASE_URL}/upload`, { method: 'POST', body: fdB });
+      if (!resB.ok) throw new Error('Failed to upload Mask B');
+      const infoB = await resB.json();
+
+      setOverlapSplitProgress('Running Overlap Split...');
+
+      const req = {
+        base_image_id: baseImage.image_id,
+        mask_a_asset_id: infoA.image_id,
+        mask_b_asset_id: infoB.image_id,
+        prompt_a: overlapPromptA,
+        prompt_b: overlapPromptB,
+        engine: overlapEngine,
+        steps: overlapParams.steps,
+        guidance_scale: overlapParams.guidance_scale,
+        strength: overlapParams.strength
+      };
+
+      const res = await fetch(`${API_BASE_URL}/overlap_split`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Overlap Split failed: ${errText}`);
+      }
+
+      const data = await res.json();
+      setOverlapSplitProgress('Finalizing...');
+
+      // Add new layers
+      const newLayers: Layer[] = data.layers.map((l: any, idx: number) => ({
+        id: l.rgba_asset_id,
+        asset_id: l.rgba_asset_id,
+        asset_url: l.rgba_url,
+        name: l.layer_name,
+        x: l.bbox[0],
+        y: l.bbox[1],
+        scale_x: 1,
+        scale_y: 1,
+        rotation_deg: 0,
+        opacity: 1,
+        visible: true,
+        locked: false,
+        z_index: layers.length + 1 + idx,
+        edge_cleanup_enabled: false,
+        edge_cleanup_strength: 50,
+        edge_cleanup_feather_px: 1,
+        edge_cleanup_erode_px: 1,
+      }));
+
+      const updatedLayers = [...layers, ...newLayers];
+      updateLayers(updatedLayers);
+
+      if (newLayers.length > 0) {
+        setSelectedLayerId(newLayers[newLayers.length - 1].id);
+      }
+
+      // Clear masks
+      setOverlapMaskA({ box: null, points: [] });
+      setOverlapMaskB({ box: null, points: [] });
+      setOverlapPromptA('');
+      setOverlapPromptB('');
+      setActiveTool('select');
+
+    } catch (err) {
+      console.error(err);
+      alert(err instanceof Error ? err.message : 'Unknown overlap split error');
+    } finally {
+      setIsOverlapSplitting(false);
+      setOverlapSplitProgress('');
+    }
+  }, [baseImage, overlapMaskA, overlapMaskB, overlapPromptA, overlapPromptB, overlapEngine, overlapParams, layers, updateLayers]);
+
+  const handleDecomposeArea = useCallback(async () => {
+    if (!baseImage) {
+      alert('No base image loaded');
+      return;
+    }
+    if (!decomposeBox) {
+      alert('No area selected');
+      return;
+    }
+
+    setIsDecomposingArea(true);
+    setDecomposeAreaProgress('Decomposing area...');
+
+    try {
+      const req = {
+        base_image_id: baseImage.image_id,
+        roi_box: decomposeBox,
+        steps: decomposeParams.steps,
+        guidance_scale: decomposeParams.guidance_scale,
+        seed: decomposeParams.seed === '' ? undefined : decomposeParams.seed,
+        num_layers: decomposeParams.num_layers,
+      };
+
+      const res = await fetch(`${API_BASE_URL}/decompose_area`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Decompose Area failed: ${errText}`);
+      }
+
+      const data = await res.json();
+      setDecomposeAreaProgress('Finalizing...');
+
+      const newLayers: Layer[] = data.layers.map((l: any, idx: number) => ({
+        id: l.rgba_asset_id,
+        asset_id: l.rgba_asset_id,
+        asset_url: l.rgba_url,
+        name: l.layer_name,
+        x: l.bbox[0],
+        y: l.bbox[1],
+        scale_x: 1,
+        scale_y: 1,
+        rotation_deg: 0,
+        opacity: 1,
+        visible: true,
+        locked: false,
+        z_index: layers.length + 1 + idx,
+        edge_cleanup_enabled: false,
+        edge_cleanup_strength: 50,
+        edge_cleanup_feather_px: 1,
+        edge_cleanup_erode_px: 1,
+      }));
+
+      const updatedLayers = [...layers, ...newLayers];
+      updateLayers(updatedLayers);
+
+      if (newLayers.length > 0) {
+        setSelectedLayerId(newLayers[newLayers.length - 1].id);
+      }
+
+      setDecomposeBox(null);
+      setActiveTool('select');
+
+    } catch (err) {
+      console.error(err);
+      alert(err instanceof Error ? err.message : 'Unknown decompose area error');
+    } finally {
+      setIsDecomposingArea(false);
+      setDecomposeAreaProgress('');
+    }
+  }, [baseImage, decomposeBox, decomposeParams, layers, updateLayers]);
 
   const handleUndo = useCallback(() => {
     if (historyIndex > 0) {
@@ -85,7 +436,8 @@ function App() {
     const newLayers = layers.filter(l => l.id !== id);
     updateLayers(newLayers);
     if (selectedLayerId === id) setSelectedLayerId(null);
-  }, [layers, selectedLayerId]);
+  }, [layers, selectedLayerId, updateLayers]);
+
 
   const uploadFile = async (file: File) => {
     setIsUploading(true);
@@ -179,6 +531,8 @@ function App() {
       if (e.key === 'z') setActiveTool('zoom');
       if (e.key === 's') setActiveTool('segment');
       if (e.key === 't') setActiveTool('text');
+      if (e.key === 'o') setActiveTool('overlap');
+      if (e.key === 'd') setActiveTool('decompose');
       
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
@@ -207,6 +561,20 @@ function App() {
     setActiveTool(tool);
     if (tool === 'text') {
         setShowTextPromptDialog(true);
+    }
+    // Clear ROI when switching away from ROI tool
+    if (tool !== 'roi') {
+        setRoiBox(null);
+        setRoiPoints([]);
+    }
+    // Clear Overlap when switching away from Overlap tool
+    if (tool !== 'overlap') {
+        setOverlapMaskA({ box: null, points: [] });
+        setOverlapMaskB({ box: null, points: [] });
+    }
+    // Clear Decompose Box when switching away
+    if (tool !== 'decompose') {
+        setDecomposeBox(null);
     }
   };
 
@@ -420,62 +788,6 @@ function App() {
     }
   };
 
-  const handleRestore = async (settings: { engine: string; prompt?: string; params?: any }) => {
-    if (!selectedLayer) {
-      alert('No layer selected');
-      return;
-    }
-
-    setIsRestoring(true);
-    setRestoreProgress('Loading model...');
-
-    try {
-      const req: ObjectRestoreRequest = {
-        layer_id: selectedLayer.id,
-        engine: settings.engine,
-        prompt: settings.prompt,
-        params: settings.params,
-      };
-
-      await new Promise(resolve => setTimeout(resolve, 0));
-      setRestoreProgress('Restoring object...');
-
-      const res = await fetch(`${API_BASE_URL}/restore_object`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req),
-      });
-
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        throw new Error(`Object restore failed (${res.status}): ${body || res.statusText}`);
-      }
-
-      setRestoreProgress('Finalizing...');
-      const data: ObjectRestoreResponse = await res.json();
-
-      handleLayerUpdate(selectedLayer.id, {
-        asset_id: data.restored_layer_asset_id,
-        asset_url: data.preview_url,
-      });
-
-      if (data.metadata?.runtime_ms != null) {
-        setRestoreProgress(`Done (runtime: ${data.metadata.runtime_ms}ms${data.metadata.cached ? ', cached' : ''})`);
-      } else {
-        setRestoreProgress('Done');
-      }
-
-      setTimeout(() => setRestoreProgress(''), 1500);
-    } catch (err) {
-      console.error(err);
-      setRestoreProgress('');
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      alert(`Failed to restore occluded parts of object: ${msg}`);
-    } finally {
-      setIsRestoring(false);
-    }
-  };
-
   const handleApplyEdgeCleanup = async () => {
     if (!selectedLayer) {
       alert('No layer selected');
@@ -669,6 +981,24 @@ function App() {
             onLayerSelect={setSelectedLayerId}
             onLayerUpdate={handleLayerUpdate}
             onSegment={handleSegment}
+            roiMode={activeTool === 'overlap' ? overlapMode : (activeTool === 'decompose' ? 'rect' : roiMode)}
+            roiBox={activeTool === 'overlap' ? (overlapActiveMask === 'A' ? overlapMaskA.box : overlapMaskB.box) : (activeTool === 'decompose' ? decomposeBox : roiBox)}
+            roiPoints={activeTool === 'overlap' ? (overlapActiveMask === 'A' ? overlapMaskA.points : overlapMaskB.points) : (activeTool === 'decompose' ? [] : roiPoints)}
+            onRoiBoxChange={activeTool === 'overlap' ? (box) => {
+                if (overlapActiveMask === 'A') setOverlapMaskA(prev => ({ ...prev, box }));
+                else setOverlapMaskB(prev => ({ ...prev, box }));
+            } : (activeTool === 'decompose' ? setDecomposeBox : setRoiBox)}
+            onRoiPointsChange={activeTool === 'overlap' ? (points) => {
+                if (overlapActiveMask === 'A') setOverlapMaskA(prev => ({ ...prev, points }));
+                else setOverlapMaskB(prev => ({ ...prev, points }));
+            } : (activeTool === 'decompose' ? () => {} : setRoiPoints)}
+            roiHintMode={roiHintMode}
+            onRoiHintPoint={handleRoiHintPoint}
+            roiFgPoint={roiFgPoint}
+            roiBgPoint={roiBgPoint}
+            overlapMaskA={overlapMaskA}
+            overlapMaskB={overlapMaskB}
+            overlapActiveMask={overlapActiveMask}
         />
       </div>
 
@@ -737,7 +1067,67 @@ function App() {
 
             {/* Panel Content */}
             <div className="flex-1 overflow-hidden relative flex flex-col">
-                {rightPanelTab === 'layers' ? (
+                {activeTool === 'roi' ? (
+                    <RoiPanel
+                        roiMode={roiMode}
+                        setRoiMode={setRoiMode}
+                        onSplit={handleRoiSplit}
+                        onClear={() => {
+                            setRoiBox(null);
+                            setRoiPoints([]);
+                            setRoiFgPoint(null);
+                            setRoiBgPoint(null);
+                            setRoiPrompt('');
+                        }}
+                        isSplitting={isSplitting}
+                        splitProgress={splitProgress}
+                        engine={roiEngine}
+                        setEngine={setRoiEngine}
+                        hasRoi={!!(roiMode === 'rect' ? roiBox : roiPoints.length >= 3)}
+                        params={roiParams}
+                        setParams={setRoiParams}
+                        hintMode={roiHintMode}
+                        setHintMode={setRoiHintMode}
+                        hintPoints={{ fg: roiFgPoint, bg: roiBgPoint }}
+                        onClearHint={(type) => type === 'fg' ? setRoiFgPoint(null) : setRoiBgPoint(null)}
+                        prompt={roiPrompt}
+                        setPrompt={setRoiPrompt}
+                    />
+                ) : activeTool === 'overlap' ? (
+                    <OverlapPanel
+                        roiMode={overlapMode}
+                        setRoiMode={setOverlapMode}
+                        activeMask={overlapActiveMask}
+                        setActiveMask={setOverlapActiveMask}
+                        maskA={overlapMaskA}
+                        maskB={overlapMaskB}
+                        onClearMask={(mask) => {
+                            if (mask === 'A') setOverlapMaskA({ box: null, points: [] });
+                            else setOverlapMaskB({ box: null, points: [] });
+                        }}
+                        promptA={overlapPromptA}
+                        setPromptA={setOverlapPromptA}
+                        promptB={overlapPromptB}
+                        setPromptB={setOverlapPromptB}
+                        onSplit={handleOverlapSplit}
+                        isSplitting={isOverlapSplitting}
+                        splitProgress={overlapSplitProgress}
+                        engine={overlapEngine}
+                        setEngine={setOverlapEngine}
+                        params={overlapParams}
+                        setParams={setOverlapParams}
+                    />
+                ) : activeTool === 'decompose' ? (
+                    <DecomposePanel
+                        onDecompose={handleDecomposeArea}
+                        onClear={() => setDecomposeBox(null)}
+                        isDecomposing={isDecomposingArea}
+                        decomposeProgress={decomposeAreaProgress}
+                        hasBox={!!decomposeBox}
+                        params={decomposeParams}
+                        setParams={setDecomposeParams}
+                    />
+                ) : rightPanelTab === 'layers' ? (
                     <LayerList
                         layers={layers}
                         selectedLayerId={selectedLayerId}
@@ -757,9 +1147,6 @@ function App() {
                         selectedLayer={selectedLayer}
                         onUpdate={(updates) => selectedLayerId && handleLayerUpdate(selectedLayerId, updates)}
                         onApplyEdgeCleanup={handleApplyEdgeCleanup}
-                        onRestore={handleRestore}
-                        isRestoring={isRestoring}
-                        restoreProgress={restoreProgress}
                         isApplyingEdgeCleanup={isApplyingEdgeCleanup}
                     />
                 )}

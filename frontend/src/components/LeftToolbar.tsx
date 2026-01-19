@@ -1,4 +1,4 @@
-import { type LucideIcon, MousePointer2, Move, Type, ZoomIn, Scan, BoxSelect, Circle } from 'lucide-react';
+import { type LucideIcon, MousePointer2, Move, Type, ZoomIn, Scan, BoxSelect, Circle, Crop, Layers, Grid } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { Tool } from '@/types';
@@ -81,6 +81,27 @@ export function LeftToolbar({ activeTool, onToolChange, onSegmentAll }: LeftTool
         icon={Type}
         onClick={onToolChange}
         title="Text Segment (T)"
+      />
+      <ToolButton
+        tool="roi"
+        active={activeTool === 'roi'}
+        icon={Crop}
+        onClick={onToolChange}
+        title="ROI Split (R)"
+      />
+      <ToolButton
+        tool="overlap"
+        active={activeTool === 'overlap'}
+        icon={Layers}
+        onClick={onToolChange}
+        title="Overlap Split (O)"
+      />
+      <ToolButton
+        tool="decompose"
+        active={activeTool === 'decompose'}
+        icon={Grid}
+        onClick={onToolChange}
+        title="Decompose Area (D)"
       />
       
       {onSegmentAll && (
