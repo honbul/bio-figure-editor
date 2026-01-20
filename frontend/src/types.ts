@@ -111,7 +111,38 @@ export interface RoiSplitRequest {
   include_background?: boolean;
 }
 
+export interface RoiSplitLayer {
+  layer_name: string;
+  rgba_asset_id: string;
+  rgba_url: string;
+  bbox: number[];
+}
+
 export interface RoiSplitResponse {
-  layers: DecomposedLayer[];
-  background_layer?: DecomposedLayer;
+  layers: RoiSplitLayer[];
+  cached: boolean;
+  timing_ms?: number;
+}
+
+export interface OverlapSplitResponse {
+  layers: RoiSplitLayer[];
+  cached: boolean;
+  timing_ms?: number;
+}
+
+export interface DecomposeAreaResponse {
+  layers: RoiSplitLayer[];
+  cached: boolean;
+  timing_ms?: number;
+}
+
+export interface SegmentAllResponse {
+  objects: SegmentResponse[];
+}
+
+export interface ExportResponse {
+  composed_asset_id: string;
+  composed_url: string;
+  zip_asset_id: string;
+  zip_url: string;
 }

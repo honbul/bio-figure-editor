@@ -7,8 +7,10 @@ import { RoiPanel } from '@/components/RoiPanel';
 import { DecomposePanel } from '@/components/DecomposePanel';
 import { OverlapPanel } from '@/components/OverlapPanel';
 import { Canvas } from '@/components/Canvas';
-import { Layer, ImageInfo, SegmentResponse, LayerDecomposeRequest, LayerDecomposeResponse, Tool, ObjectEdgeCleanupRequest, ObjectEdgeCleanupResponse } from '@/types';
-import { API_BASE_URL } from '@/config';
+import { api } from '@/api';
+import { useHistory } from '@/hooks/useHistory';
+import { Layer, ImageInfo, SegmentResponse, LayerDecomposeRequest, LayerDecomposeResponse, Tool, ObjectEdgeCleanupRequest, ObjectEdgeCleanupResponse, RoiSplitResponse, OverlapSplitResponse, DecomposeAreaResponse, SegmentAllResponse, ExportResponse } from '@/types';
+
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Loader2, Sliders, Upload, Layers, Settings2 } from 'lucide-react';
@@ -24,10 +26,8 @@ function App() {
   const [baseImage, setBaseImage] = useState<ImageInfo | null>(null);
   const [_baseImageHistory, setBaseImageHistory] = useState<ImageInfo[]>([]);
   const [_baseImageHistoryIndex, setBaseImageHistoryIndex] = useState(-1);
-  const [layers, setLayers] = useState<Layer[]>([]);
+  const { layers, setLayers, updateLayers, undo, redo, canUndo, canRedo } = useHistory([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
-  const [history, setHistory] = useState<Layer[][]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
   const [isUploading, setIsUploading] = useState(false);
   const [isSegmenting, setIsSegmenting] = useState(false);
   const [isApplyingEdgeCleanup, setIsApplyingEdgeCleanup] = useState(false);
@@ -84,18 +84,6 @@ function App() {
     }
   }, [selectedLayerId]);
 
-  const pushHistory = useCallback((newLayers: Layer[]) => {
-    const newHistory = history.slice(0, historyIndex + 1);
-    newHistory.push(newLayers);
-    setHistory(newHistory);
-    setHistoryIndex(newHistory.length - 1);
-  }, [history, historyIndex]);
-
-  const updateLayers = useCallback((newLayers: Layer[]) => {
-    setLayers(newLayers);
-    pushHistory(newLayers);
-  }, [pushHistory]);
-
   const handleRoiHintPoint = useCallback((mode: 'fg' | 'bg', point: { x: number, y: number }) => {
     if (mode === 'fg') {
       setRoiFgPoint(point);
@@ -128,19 +116,7 @@ function App() {
       );
 
       setSplitProgress('Uploading mask...');
-      const fd = new FormData();
-      fd.append('file', maskBlob, 'mask.png');
-
-      const uploadRes = await fetch(`${API_BASE_URL}/upload`, {
-        method: 'POST',
-        body: fd,
-      });
-
-      if (!uploadRes.ok) {
-        throw new Error('Failed to upload ROI mask asset');
-      }
-
-      const maskInfo = await uploadRes.json();
+      const maskInfo = await api.upload(maskBlob);
       const maskAssetId = maskInfo.image_id;
 
       setSplitProgress('Running ROI Split (this may take a while)...');
@@ -159,18 +135,7 @@ function App() {
       if (roiFgPoint) splitReq.fg_point = { x: roiFgPoint.x, y: roiFgPoint.y, label: 1 };
       if (roiBgPoint) splitReq.bg_point = { x: roiBgPoint.x, y: roiBgPoint.y, label: 0 };
 
-      const res = await fetch(`${API_BASE_URL}/roi_split`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(splitReq),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`ROI Split failed: ${errText}`);
-      }
-
-      const data = await res.json();
+      const data: RoiSplitResponse = await api.roiSplit(splitReq);
       setSplitProgress('Finalizing...');
 
       const newLayers: Layer[] = data.layers.map((l: any, idx: number) => ({
@@ -253,17 +218,8 @@ function App() {
 
       setOverlapSplitProgress('Uploading masks...');
       
-      const fdA = new FormData();
-      fdA.append('file', maskABlob, 'maskA.png');
-      const resA = await fetch(`${API_BASE_URL}/upload`, { method: 'POST', body: fdA });
-      if (!resA.ok) throw new Error('Failed to upload Mask A');
-      const infoA = await resA.json();
-
-      const fdB = new FormData();
-      fdB.append('file', maskBBlob, 'maskB.png');
-      const resB = await fetch(`${API_BASE_URL}/upload`, { method: 'POST', body: fdB });
-      if (!resB.ok) throw new Error('Failed to upload Mask B');
-      const infoB = await resB.json();
+      const infoA = await api.upload(maskABlob);
+      const infoB = await api.upload(maskBBlob);
 
       setOverlapSplitProgress('Running Overlap Split...');
 
@@ -279,18 +235,7 @@ function App() {
         strength: overlapParams.strength
       };
 
-      const res = await fetch(`${API_BASE_URL}/overlap_split`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Overlap Split failed: ${errText}`);
-      }
-
-      const data = await res.json();
+      const data: OverlapSplitResponse = await api.overlapSplit(req);
       setOverlapSplitProgress('Finalizing...');
 
       // Add new layers
@@ -353,25 +298,14 @@ function App() {
     try {
       const req = {
         base_image_id: baseImage.image_id,
-        roi_box: decomposeBox,
+        roi_box: decomposeBox.map(Math.round),
         steps: decomposeParams.steps,
         guidance_scale: decomposeParams.guidance_scale,
         seed: decomposeParams.seed === '' ? undefined : decomposeParams.seed,
         num_layers: decomposeParams.num_layers,
       };
 
-      const res = await fetch(`${API_BASE_URL}/decompose_area`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Decompose Area failed: ${errText}`);
-      }
-
-      const data = await res.json();
+      const data: DecomposeAreaResponse = await api.decomposeArea(req);
       setDecomposeAreaProgress('Finalizing...');
 
       const newLayers: Layer[] = data.layers.map((l: any, idx: number) => ({
@@ -413,20 +347,6 @@ function App() {
     }
   }, [baseImage, decomposeBox, decomposeParams, layers, updateLayers]);
 
-  const handleUndo = useCallback(() => {
-    if (historyIndex > 0) {
-      setHistoryIndex(prev => prev - 1);
-      setLayers(history[historyIndex - 1]);
-    }
-  }, [history, historyIndex]);
-
-  const handleRedo = useCallback(() => {
-    if (historyIndex < history.length - 1) {
-      setHistoryIndex(prev => prev + 1);
-      setLayers(history[historyIndex + 1]);
-    }
-  }, [history, historyIndex]);
-
   const handleLayerUpdate = (id: string, updates: Partial<Layer>) => {
     const newLayers = layers.map(l => l.id === id ? { ...l, ...updates } : l);
     updateLayers(newLayers);
@@ -438,38 +358,19 @@ function App() {
     if (selectedLayerId === id) setSelectedLayerId(null);
   }, [layers, selectedLayerId, updateLayers]);
 
-
   const uploadFile = async (file: File) => {
     setIsUploading(true);
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-    const buildFormData = () => {
-      const fd = new FormData();
-      fd.append('file', file);
-      return fd;
-    };
 
     try {
       let lastErr: unknown = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const res = await fetch(`${API_BASE_URL}/upload`, {
-            method: 'POST',
-            body: buildFormData(),
-          });
-
-          if (!res.ok) {
-            const body = await res.text().catch(() => '');
-            throw new Error(`Upload failed (${res.status}): ${body || res.statusText}`);
-          }
-
-          const data: ImageInfo = await res.json();
+          const data: any = await api.upload(file);
           setBaseImage(data);
           setBaseImageHistory([data]);
           setBaseImageHistoryIndex(0);
           setLayers([]);
-          setHistory([[]]);
-          setHistoryIndex(0);
           lastErr = null;
           break;
         } catch (e) {
@@ -487,10 +388,7 @@ function App() {
     } catch (err) {
       console.error(err);
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      const hint = msg.includes('NetworkError') || msg.includes('Failed to fetch')
-        ? `\n\nCheck backend is reachable at: ${API_BASE_URL}`
-        : '';
-      alert(`Failed to upload image: ${msg}${hint}`);
+      alert(`Failed to upload image: ${msg}`);
     } finally {
       setIsUploading(false);
     }
@@ -536,11 +434,11 @@ function App() {
       
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
-        handleUndo();
+        undo();
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
         e.preventDefault();
-        handleRedo();
+        redo();
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedLayerId) {
@@ -551,7 +449,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, selectedLayerId, handleLayerDelete]);
+  }, [undo, redo, selectedLayerId, handleLayerDelete]);
 
   const [textPrompt, setTextPrompt] = useState<string>('');
   const [showTextPromptDialog, setShowTextPromptDialog] = useState(false);
@@ -582,18 +480,14 @@ function App() {
     if (!textPrompt.trim()) return;
     setShowTextPromptDialog(false);
 
-    // Trigger segmentation with text
     if (!baseImage) return;
 
     setIsSegmenting(true);
     try {
-        const res = await fetch(`${API_BASE_URL}/segment`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+        const data: SegmentResponse = await api.segment({
               image_id: baseImage.image_id,
               text_prompt: textPrompt,
-              multimask_output: false, // Text usually returns 1 mask
+              multimask_output: false,
               threshold: segmentationThreshold,
               edge_cleanup: {
                 enabled: false,
@@ -601,11 +495,7 @@ function App() {
                 feather_px: 2,
                 erode_px: 1,
               },
-            }),
-        });
-
-        if (!res.ok) throw new Error('Segmentation failed');
-        const data: SegmentResponse = await res.json();
+            });
 
         addLayerFromResponse(data);
         setActiveTool('select');
@@ -661,21 +551,14 @@ function App() {
 
     setIsSegmenting(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/segment`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data: SegmentResponse = await api.segment({
           image_id: baseImage.image_id,
-          points: (!box) ? [{ x, y, label: 1 }] : [],
-          box_xyxy: box,
+          points: (!box) ? [{ x: Math.round(x), y: Math.round(y), label: 1 }] : [],
+          box_xyxy: box?.map(Math.round),
           multimask_output: true,
           threshold: segmentationThreshold,
           edge_cleanup: edgeCleanupSettings,
-        }),
-      });
-
-      if (!res.ok) throw new Error('Segmentation failed');
-      const data: SegmentResponse = await res.json();
+        });
 
       addLayerFromResponse(data);
       setActiveTool('select'); // Auto-switch to select after segmentation
@@ -692,10 +575,7 @@ function App() {
 
     setIsSegmenting(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/segment-all`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data: SegmentAllResponse = await api.segmentAll({
           image_id: baseImage.image_id,
           edge_cleanup: {
             enabled: false,
@@ -703,11 +583,7 @@ function App() {
             feather_px: 2,
             erode_px: 1,
           },
-        }),
-      });
-
-      if (!res.ok) throw new Error('Segment All failed');
-      const data = await res.json();
+        });
 
       const newLayers: Layer[] = data.objects.map((obj: any, idx: number) => ({
         id: obj.object_asset_id,
@@ -766,18 +642,11 @@ function App() {
         mask_asset_id: l.mask_asset_id,
       }));
 
-      const res = await fetch(`${API_BASE_URL}/export`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data: ExportResponse = await api.export({
           base_image_id: baseImage.image_id,
           layers: exportLayers,
           include_base_image: exportIncludeBase,
-        }),
-      });
-
-      if (!res.ok) throw new Error('Export failed');
-      const data = await res.json();
+        });
 
       // Trigger download
       window.open(data.zip_url, '_blank');
@@ -808,14 +677,7 @@ function App() {
         erode_px: selectedLayer.edge_cleanup_erode_px ?? 1,
       };
 
-      const res = await fetch(`${API_BASE_URL}/object_edge_cleanup`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req),
-      });
-
-      if (!res.ok) throw new Error('Object edge cleanup failed');
-      const data: ObjectEdgeCleanupResponse = await res.json();
+      const data: ObjectEdgeCleanupResponse = await api.edgeCleanup(req);
 
       handleLayerUpdate(selectedLayer.id, {
         asset_id: data.object_asset_id,
@@ -835,15 +697,7 @@ function App() {
     setIsReloadingModels(true);
     
     try {
-      const res = await fetch(`${API_BASE_URL}/reload_models`, {
-        method: 'POST',
-      });
-      
-      const data = await res.json();
-      
-      if (!res.ok) {
-        throw new Error(data.detail || 'Failed to reload models');
-      }
+      const data: any = await api.reloadModels();
       
       let msg = 'Models reloaded successfully.';
       if (data.vram_allocated_mb) {
@@ -878,15 +732,7 @@ function App() {
 
       setDecomposeProgress('Analyzing image and decomposing layers...');
 
-      const res = await fetch(`${API_BASE_URL}/layer_decompose`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(request),
-      });
-
-      if (!res.ok) throw new Error('Layer decomposition failed');
-
-      const data: LayerDecomposeResponse = await res.json();
+      const data: LayerDecomposeResponse = await api.layerDecompose(request);
       setDecomposeProgress('Creating layers from decomposition results...');
 
       const newLayers: Layer[] = data.layers.map((layer, idx) => ({
@@ -1011,10 +857,10 @@ function App() {
                 onExport={() => setShowExportDialog(true)}
                 onLayerDecompose={() => setShowLayerDecomposeDialog(true)}
                 onReloadModels={handleReloadModels}
-                onUndo={handleUndo}
-                onRedo={handleRedo}
-                canUndo={historyIndex > 0}
-                canRedo={historyIndex < history.length - 1}
+                onUndo={undo}
+                onRedo={redo}
+                canUndo={canUndo}
+                canRedo={canRedo}
                 fileName={baseImage ? `image-${baseImage.image_id.slice(0,6)}` : undefined}
                 isReloadingModels={isReloadingModels}
             />
@@ -1303,3 +1149,4 @@ function App() {
 }
 
 export default App;
+
