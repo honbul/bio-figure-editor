@@ -58,7 +58,7 @@ def pil_to_rgba(img: Image.Image) -> Image.Image:
 def mask_from_rgba_alpha(mask_rgba: Image.Image, size: tuple[int, int]) -> Image.Image:
     m = pil_to_rgba(mask_rgba)
     if m.size != size:
-        m = m.resize(size, resample=Image.NEAREST)
+        m = m.resize(size, resample=Image.Resampling.NEAREST)
     alpha = np.asarray(m)[:, :, 3].astype(np.uint8)
     return Image.fromarray(np.where(alpha > 0, 255, 0).astype(np.uint8), mode="L")
 
@@ -133,8 +133,8 @@ def resize_long_edge(
     nw = max(8, (nw // 8) * 8)
     nh = max(8, (nh // 8) * 8)
 
-    resized_img = image.resize((nw, nh), resample=Image.BICUBIC)
-    resized_mask = mask_l.resize((nw, nh), resample=Image.NEAREST)
+    resized_img = image.resize((nw, nh), resample=Image.Resampling.BICUBIC)
+    resized_mask = mask_l.resize((nw, nh), resample=Image.Resampling.NEAREST)
     return resized_img, resized_mask, (w, h)
 
 
@@ -209,8 +209,13 @@ def format_engine_error(e: RestoreEngineError) -> dict[str, object]:
     }
 
 
-def timed(fn):
-    def _wrap(*args, **kwargs):
+from typing import Any, Callable, TypeVar
+
+T = TypeVar("T")
+
+
+def timed(fn: Callable[..., T]) -> Callable[..., tuple[T, int]]:
+    def _wrap(*args: Any, **kwargs: Any) -> tuple[T, int]:
         started = time.time()
         out = fn(*args, **kwargs)
         runtime_ms = int((time.time() - started) * 1000)

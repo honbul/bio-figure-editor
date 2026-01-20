@@ -43,15 +43,18 @@ class QwenLayeredService:
             import gc
             import torch
 
-            del pipeline
+            if pipeline is not None:
+                try:
+                    pipeline.to("cpu")
+                except Exception:
+                    pass
+                del pipeline
+
             gc.collect()
 
             if torch.cuda.is_available():
-                try:
-                    torch.cuda.ipc_collect()
-                except Exception:
-                    pass
                 torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
         except Exception:
             pass
 

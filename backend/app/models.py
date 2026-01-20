@@ -173,7 +173,13 @@ class AssetInfo(BaseModel):
     url: str
 
 
-class RoiSplitRequest(BaseModel):
+class BaseServiceParams(BaseModel):
+    steps: int | None = Field(None, ge=1, le=200)
+    guidance_scale: float | None = Field(None, ge=0.0, le=50.0)
+    seed: int | None = None
+
+
+class RoiSplitRequest(BaseServiceParams):
     base_image_id: str
     roi_mask_asset_id: str
     engine: str = Field(
@@ -183,9 +189,6 @@ class RoiSplitRequest(BaseModel):
     fg_point: PointPrompt | None = None
     bg_point: PointPrompt | None = None
     prompt: str | None = None
-    steps: int | None = Field(None, ge=1, le=200)
-    guidance_scale: float | None = Field(None, ge=0.0, le=50.0)
-    seed: int | None = None
     resize_long_edge: int | None = Field(None, ge=64, le=2048)
 
 
@@ -202,16 +205,13 @@ class RoiSplitResponse(BaseModel):
     timing_ms: int | None = None
 
 
-class OverlapSplitRequest(BaseModel):
+class OverlapSplitRequest(BaseServiceParams):
     base_image_id: str
     mask_a_asset_id: str
     mask_b_asset_id: str
     engine: str = Field("sdxl_inpaint", pattern="^(sdxl_inpaint)$")
     prompt_a: str | None = None
     prompt_b: str | None = None
-    steps: int | None = Field(None, ge=1, le=200)
-    guidance_scale: float | None = Field(None, ge=0.0, le=50.0)
-    seed: int | None = None
     resize_long_edge: int | None = Field(None, ge=64, le=2048)
 
 
@@ -221,13 +221,10 @@ class OverlapSplitResponse(BaseModel):
     timing_ms: int | None = None
 
 
-class DecomposeAreaRequest(BaseModel):
+class DecomposeAreaRequest(BaseServiceParams):
     base_image_id: str
     roi_box: list[int] = Field(..., min_length=4, max_length=4)
     num_layers: int | None = Field(5, ge=1, le=20)
-    steps: int | None = Field(None, ge=1, le=200)
-    guidance_scale: float | None = Field(None, ge=0.0, le=50.0)
-    seed: int | None = None
 
 
 class DecomposeAreaResponse(BaseModel):

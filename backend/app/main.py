@@ -48,6 +48,7 @@ from .postprocess import (
 from .qwen_service import QwenLayeredService
 from .sam3_service import Sam3Service
 from .storage import Storage, get_api_base_url
+from .utils import save_segmentation_assets, clear_gpu_memory
 from backend.services.decompose_area import DecomposeAreaService
 from backend.services.overlap_split import OverlapSplitService
 from backend.services.roi_split import RoiSplitService
@@ -98,7 +99,9 @@ async def upload_image(file: UploadFile = File(...)) -> ImageInfo:
 
 @app.post("/layer_decompose", response_model=LayerDecomposeResponse)
 def layer_decompose(req: LayerDecomposeRequest) -> LayerDecomposeResponse:
-    return qwen_service.decompose(req)
+    res = qwen_service.decompose(req)
+    clear_gpu_memory()
+    return res
 
 
 @app.post("/qwen_warmup", response_model=QwenWarmupResponse)
@@ -114,16 +117,28 @@ def reload_models() -> ReloadModelsResponse:
         overlap_split_service.reset()
         decompose_area_service.reset()
 
+        clear_gpu_memory()
+
         import gc
         import torch
 
-        gc.collect()
-        if torch.cuda.is_available():
+        for obj in gc.get_objects():
             try:
-                torch.cuda.ipc_collect()
+                if torch.is_tensor(obj) or (
+                    hasattr(obj, "data") and torch.is_tensor(obj.data)
+                ):
+                    if obj.device.type == "cuda":
+                        obj.to("cpu")
+                        del obj
             except Exception:
                 pass
+
+        gc.collect()
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+        cuda = torch.cuda.is_available()
 
         cuda = torch.cuda.is_available()
         vram_alloc_mb = None
@@ -249,61 +264,21 @@ def segment(req: SegmentRequest) -> SegmentResponse:
         threshold=req.threshold,
     )
 
-    ys, xs = np.where(mask_u8 > 0)
-    if len(xs) == 0 or len(ys) == 0:
-        raise HTTPException(status_code=422, detail="no mask predicted")
-
-    x0, x1 = int(xs.min()), int(xs.max()) + 1
-    y0, y1 = int(ys.min()), int(ys.max()) + 1
-    bbox_xyxy = [x0, y0, x1, y1]
-
-    alpha = Image.fromarray(mask_u8, mode="L")
-
-    mask_rgba = Image.new("RGBA", base_rgb.size, (255, 255, 255, 0))
-    mask_rgba.putalpha(alpha)
-
-    mask_asset_id = storage.new_asset_id()
-    mask_path = storage.asset_path(mask_asset_id, ".png")
-    mask_rgba.save(mask_path, format="PNG")
-
-    base_rgba = base_rgb.convert("RGBA")
-    base_rgba.putalpha(alpha)
-    object_rgba = base_rgba.crop((x0, y0, x1, y1))
-
+    edge_params = None
     if req.edge_cleanup is not None and req.edge_cleanup.enabled:
-        cleaned = clean_rgba_edges(
-            np.asarray(base_rgba),
-            mask_u8,
-            EdgeCleanupParams(
-                enabled=req.edge_cleanup.enabled,
-                strength=req.edge_cleanup.strength,
-                feather_px=req.edge_cleanup.feather_px,
-                erode_px=req.edge_cleanup.erode_px,
-            ),
+        edge_params = EdgeCleanupParams(
+            enabled=req.edge_cleanup.enabled,
+            strength=req.edge_cleanup.strength,
+            feather_px=req.edge_cleanup.feather_px,
+            erode_px=req.edge_cleanup.erode_px,
         )
-        object_rgba = Image.fromarray(cleaned, mode="RGBA").crop((x0, y0, x1, y1))
 
-    object_asset_id = storage.new_asset_id()
-    object_path = storage.asset_path(object_asset_id, ".png")
-    object_rgba.save(object_path, format="PNG")
-
-    overlay_alpha = alpha.point([0] + [90] * 255)
-    overlay = Image.new("RGBA", base_rgb.size, (255, 0, 0, 0))
-    overlay.putalpha(overlay_alpha)
-
-    overlay_asset_id = storage.new_asset_id()
-    overlay_path = storage.asset_path(overlay_asset_id, ".png")
-    overlay.save(overlay_path, format="PNG")
-
-    return SegmentResponse(
-        mask_asset_id=mask_asset_id,
-        mask_url=_asset_url(mask_asset_id),
-        overlay_asset_id=overlay_asset_id,
-        overlay_url=_asset_url(overlay_asset_id),
-        object_asset_id=object_asset_id,
-        object_url=_asset_url(object_asset_id),
-        bbox_xyxy=bbox_xyxy,
-    )
+    try:
+        res = save_segmentation_assets(storage, base_rgb, mask_u8, edge_params)
+        clear_gpu_memory()
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @app.post("/segment-all", response_model=SegmentAllResponse)
@@ -319,73 +294,23 @@ def segment_all(req: SegmentAllRequest) -> SegmentAllResponse:
 
     segment_responses = []
 
-    for mask_u8, iou in results:
-        # Process each object (save assets)
-        # This duplicates logic from /segment but applied to many objects.
-        # Ideally refactor asset saving, but for MVP inline is fine.
-
-        ys, xs = np.where(mask_u8 > 0)
-        if len(xs) == 0 or len(ys) == 0:
-            continue
-
-        x0, x1 = int(xs.min()), int(xs.max()) + 1
-        y0, y1 = int(ys.min()), int(ys.max()) + 1
-        bbox_xyxy = [x0, y0, x1, y1]
-
-        alpha = Image.fromarray(mask_u8, mode="L")
-
-        # Save Mask
-        mask_rgba = Image.new("RGBA", base_rgb.size, (255, 255, 255, 0))
-        mask_rgba.putalpha(alpha)
-
-        mask_asset_id = storage.new_asset_id()
-        mask_path = storage.asset_path(mask_asset_id, ".png")
-        mask_rgba.save(mask_path, format="PNG")
-
-        # Save Object Crop
-        base_rgba = base_rgb.convert("RGBA")
-        base_rgba.putalpha(alpha)
-        object_rgba = base_rgba.crop((x0, y0, x1, y1))
-
-        if req.edge_cleanup is not None and req.edge_cleanup.enabled:
-            cleaned = clean_rgba_edges(
-                np.asarray(base_rgba),
-                mask_u8,
-                EdgeCleanupParams(
-                    enabled=req.edge_cleanup.enabled,
-                    strength=req.edge_cleanup.strength,
-                    feather_px=req.edge_cleanup.feather_px,
-                    erode_px=req.edge_cleanup.erode_px,
-                ),
-            )
-            object_rgba = Image.fromarray(cleaned, mode="RGBA").crop((x0, y0, x1, y1))
-
-        object_asset_id = storage.new_asset_id()
-        object_path = storage.asset_path(object_asset_id, ".png")
-        object_rgba.save(object_path, format="PNG")
-
-        # Save Overlay (Optional - maybe skip for segment all to save space? But frontend might expect it)
-        # We'll generate it to be safe/consistent.
-        overlay_alpha = alpha.point([0] + [90] * 255)
-        overlay = Image.new("RGBA", base_rgb.size, (255, 0, 0, 0))
-        overlay.putalpha(overlay_alpha)
-
-        overlay_asset_id = storage.new_asset_id()
-        overlay_path = storage.asset_path(overlay_asset_id, ".png")
-        overlay.save(overlay_path, format="PNG")
-
-        segment_responses.append(
-            SegmentResponse(
-                mask_asset_id=mask_asset_id,
-                mask_url=_asset_url(mask_asset_id),
-                overlay_asset_id=overlay_asset_id,
-                overlay_url=_asset_url(overlay_asset_id),
-                object_asset_id=object_asset_id,
-                object_url=_asset_url(object_asset_id),
-                bbox_xyxy=bbox_xyxy,
-            )
+    edge_params = None
+    if req.edge_cleanup is not None and req.edge_cleanup.enabled:
+        edge_params = EdgeCleanupParams(
+            enabled=req.edge_cleanup.enabled,
+            strength=req.edge_cleanup.strength,
+            feather_px=req.edge_cleanup.feather_px,
+            erode_px=req.edge_cleanup.erode_px,
         )
 
+    for mask_u8, iou in results:
+        try:
+            resp = save_segmentation_assets(storage, base_rgb, mask_u8, edge_params)
+            segment_responses.append(resp)
+        except ValueError:
+            continue
+
+    clear_gpu_memory()
     return SegmentAllResponse(objects=segment_responses)
 
 
@@ -510,6 +435,7 @@ def overlap_split(req: OverlapSplitRequest) -> OverlapSplitResponse:
             req.prompt_a,
             req.prompt_b,
         )
+        clear_gpu_memory()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Overlap split failed: {e}")
 
@@ -575,6 +501,7 @@ def roi_split(req: RoiSplitRequest) -> RoiSplitResponse:
             bg_point=bg_point,
             prompt=req.prompt,
         )
+        clear_gpu_memory()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"ROI split failed: {e}")
 
@@ -623,6 +550,7 @@ def decompose_area(req: DecomposeAreaRequest) -> DecomposeAreaResponse:
             req.base_image_id,
             params,
         )
+        clear_gpu_memory()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Decompose area failed: {e}")
 
